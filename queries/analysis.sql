@@ -117,6 +117,7 @@ WITH amounts AS (
            WHEN '$500,001 - $1,000,000'    THEN 500001
            WHEN '$1,000,001 - $5,000,000'  THEN 1000001
            WHEN '$5,000,001 - $25,000,000' THEN 5000001
+           WHEN '$25,000,001 - $50,000,000' THEN 25000001
            ELSE NULL
          END AS bucket_min
   FROM trades t
@@ -131,6 +132,17 @@ LIMIT 25;
 -- Amount-range distribution
 SELECT amount_range, count(*) AS trades
 FROM trades
+GROUP BY 1
+ORDER BY 2 DESC;
+
+-- Amount ranges that don't match a standard bucket (parse artifacts — check raw)
+SELECT amount_range, count(*) AS trades
+FROM trades
+WHERE amount_range IS NOT NULL AND amount_range <> ''
+  AND amount_range NOT IN (
+    '$1,001 - $15,000', '$15,001 - $50,000', '$50,001 - $100,000',
+    '$100,001 - $250,000', '$250,001 - $500,000', '$500,001 - $1,000,000',
+    '$1,000,001 - $5,000,000', '$5,000,001 - $25,000,000', '$25,000,001 - $50,000,000')
 GROUP BY 1
 ORDER BY 2 DESC;
 
