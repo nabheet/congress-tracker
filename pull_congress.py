@@ -606,21 +606,28 @@ def house_ptr_trades_columnar(lines):
     return trades
 
 
-def run_house(conn, years=None):
+def run_house(conn, years=None, refresh=False):
     """Pull House filings from the Clerk's bulk index ZIPs and parse PTR trades.
 
     Trade-level data exists only inside the individual PTR PDFs, so each PTR
     filing that has no trades yet is downloaded and parsed from its text layer
     (0.2s pause per PDF; index rows commit first so an interrupted run keeps
     its progress). This also backfills PTRs indexed before stage 2 existed.
+
+    With refresh=True, every PTR filing is re-downloaded and re-parsed and its
+    trades are replaced, healing rows stored by older parser versions (e.g.
+    truncated comments). Never set by the cron schedule.
     """
     s = Session()
     if years is None:
         today = date.today()
         years = [today.year, today.year - 1]  # current + prior year catches late filings
-    with conn.cursor() as cur:
-        cur.execute("SELECT DISTINCT filing_id FROM trades")
-        done = {r[0] for r in cur.fetchall()}
+    if not refresh:
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT filing_id FROM trades")
+            done = {r[0] for r in cur.fetchall()}
+    else:
+        done = set()
     new_filings = 0
     new_trades = 0
     for year in sorted(years):
@@ -636,6 +643,9 @@ def run_house(conn, years=None):
             trades = house_ptr_trades(s, filing["raw_url"])
             if trades:
                 with conn.cursor() as cur:
+                    if refresh:
+                        cur.execute("DELETE FROM trades WHERE filing_id = %s",
+                                    (filing["id"],))
                     insert_trades(cur, filing["id"], trades)
                 new_trades += len(trades)
                 conn.commit()
@@ -781,7 +791,7 @@ def main():
             run_migrations(conn)
             nf, nt = run_senate(conn, start=start, end=end)
             log(f"senate done: {nf} new filings, {nt} new trades")
-            hf, ht = run_house(conn)
+            hf, ht = run_house(conn, refresh=os.environ.get("REFRESH_HOUSE") == "1")
             log(f"house done: {hf} new filings, {ht} new trades")
     except Exception as e:
         log(f"ERROR: {e!r}")
