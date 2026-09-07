@@ -294,7 +294,7 @@ BOUNDARY_RE = re.compile(
     r"\* For the complete list|I CERTIFY|Digitally Signed|Clerk of the House|"
     r"Yes No|Real estate investments|Stocks, Bonds, & Mutual Funds|"
     r"P T R|F I|I V D|I P O|C S|T$|C$|"
-    r"[A-Z] ?[A-Z]?:)"
+    r"(?!D ?:)[A-Z] ?[A-Z]?:)"
 )
 
 

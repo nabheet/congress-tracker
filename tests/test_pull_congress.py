@@ -216,22 +216,26 @@ class TestHousePtrTradesColumnar:
         assert trades[0]["owner"] == "Joint"
 
     def test_columnar_d_line_ends_amount_scan(self):
-        # BOUNDARY_RE matches "D:" (via "[A-Z] ?[A-Z]?:"), so a comment line
-        # terminates the amount scan before the comment block is reached:
-        # the row is skipped, no comment is ever captured.
+        # BOUNDARY_RE no longer matches "D:" (excluded via "(?!D ?:)"),
+        # so a comment line after the amount does not terminate the row:
+        # the D: comment is captured, a second "D:" line joins it, and the
+        # amount is preserved.
         text = ("ID Owner Asset Transaction Date\n"
                 "SP Apple Inc S 09/01/2026 09/05/2026\n"
-                "D: sold some\n"
-                "due to rebalancing\n"
                 "[GS]\n"
                 "$1,000,000\n"
+                "D: sold some\n"
+                "D: second thought\n"
                 "JT Tesla Inc X 09/02/2026 09/06/2026\n"
                 "[ST]\n"
                 "$15,001 - $50,000\n")
         trades = pc.house_trades_from_text(text)
-        assert len(trades) == 1
-        assert trades[0]["owner"] == "Joint"
-        assert trades[0]["comment"] is None
+        assert len(trades) == 2
+        assert trades[0]["owner"] == "Spouse"
+        assert trades[0]["amount"] == "$1,000,000"
+        assert trades[0]["comment"] == "sold some second thought"
+        assert trades[1]["owner"] == "Joint"
+        assert trades[1]["comment"] is None
 
 
 # ---------------------------------------------------------------- parser edge cases
@@ -292,15 +296,15 @@ class TestHouseParserEdgeCases:
 
     def test_comment_continuation_lines(self):
         # Plain-text continuation lines join the comment; a second "D:" line
-        # matches BOUNDARY_RE and terminates it (the D:-continuation branch at
-        # 474-478 is unreachable for the same reason).
+        # is excluded from BOUNDARY_RE (via "(?!D ?:)") and joins too, so
+        # the D:-continuation branch is reachable.
         text = ("SP Apple Inc. (AAPL) [ST] P 09/01/2026 09/05/2026 $1,001 - $15,000\n"
                 "D: sold shares\n"
                 "due to rebalancing\n"
                 "D: second thought\n"
                 "P 09/02/2026 09/06/2026 $1,001 - $15,000\n")
         trades = pc.house_trades_from_text(text)
-        assert trades[0]["comment"] == "sold shares due to rebalancing"
+        assert trades[0]["comment"] == "sold shares due to rebalancing second thought"
 
     def test_footer_stops_comment_scan(self):
         text = ("P 09/01/2026 09/05/2026 $1,001 - $15,000\n"
