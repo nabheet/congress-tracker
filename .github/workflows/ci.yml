@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
     branches: [main]
 
@@ -42,3 +43,40 @@ jobs:
 
       - name: Verify supercronic present
         run: docker run --rm --entrypoint /usr/local/bin/supercronic congress-pull:ci -version
+
+  publish-image:
+    name: Publish Docker image
+    if: github.event_name == 'push'
+    needs: [lint-and-typecheck, build-image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute tags
+        id: meta
+        run: |
+          IMG="ghcr.io/${GITHUB_REPOSITORY,,}"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            TAGS="${IMG}:${GITHUB_REF_NAME},${IMG}:latest"
+          else
+            TAGS="${IMG}:latest,${IMG}:sha-${SHORT_SHA}"
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
