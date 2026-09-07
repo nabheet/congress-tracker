@@ -841,6 +841,41 @@ class TestRunHouse:
         assert nt == 0
         assert len(fake.request_bytes_calls) == 1  # zip only, no PDF fetch
 
+    def test_refresh_reparses_existing_ptr(self, monkeypatch):
+        year = 2026
+        xml = """<?xml version="1.0"?>
+<Members>
+  <Member><Last>Smith</Last><First>John</First><FilingType>P</FilingType>
+    <FilingDate>09/01/2026</FilingDate><DocID>111</DocID></Member>
+</Members>
+"""
+        zip_url = pc.HOUSE_PUBLIC + f"/financial-pdfs/{year}FD.zip"
+        pdf_url = pc.HOUSE_PUBLIC + f"/ptr-pdfs/{year}/111.pdf"
+        fake = FakeSession(bytes_by_url={
+            zip_url: make_fd_zip(year, xml),
+            pdf_url: b"%PDF-fake",
+        })
+        monkeypatch.setattr(pc, "Session", lambda: fake)
+        monkeypatch.setattr(pc.time, "sleep", lambda s: None)
+        monkeypatch.setattr(
+            pc.pdfplumber, "open",
+            lambda *a, **k: FakePdf([FakePdfPage(
+                "SP Apple Inc. (AAPL) [ST] P 09/01/2026 09/05/2026 $1,001 - $15,000")]))
+
+        # Trades already exist, so a plain run would skip the PDF. refresh=True
+        # must ignore `done`, re-fetch the PDF, delete the stale rows, and
+        # re-insert freshly parsed trades.
+        cur_done = FakeCursor(fetchall_result=[("house:111",)])
+        cur_trades = FakeCursor()
+        conn = FakeConn(cursors=[cur_done, cur_trades])
+        nf, nt = pc.run_house(conn, years=[year], refresh=True)
+        assert nf == 1
+        assert nt == 1
+        assert fake.request_bytes_calls == [zip_url, pdf_url]  # PDF re-fetched
+        deletes = [c for c in cur_trades.calls
+                   if c[0] == "DELETE FROM trades WHERE filing_id = %s"]
+        assert deletes == [("DELETE FROM trades WHERE filing_id = %s", ("house:111",))]
+
 
 # ---------------------------------------------------------------- db: db_conn
 
@@ -877,7 +912,7 @@ class TestMain:
         monkeypatch.setattr(pc, "run_senate",
                             lambda conn, start=None, end=None:
                             seen.update(start=start, end=end) or (0, 0))
-        monkeypatch.setattr(pc, "run_house", lambda conn: (0, 0))
+        monkeypatch.setattr(pc, "run_house", lambda conn, refresh=False: (0, 0))
         monkeypatch.setenv("START_DATE", "2026-08-01")
         monkeypatch.setenv("END_DATE", "2026-09-01")
         pc.main()
@@ -890,7 +925,8 @@ class TestMain:
         monkeypatch.setattr(pc, "run_migrations", lambda conn: calls.setdefault("mig", True))
         monkeypatch.setattr(pc, "run_senate",
                             lambda conn, start=None, end=None: calls.setdefault("sen", (1, 2)))
-        monkeypatch.setattr(pc, "run_house", lambda conn: calls.setdefault("house", (3, 4)))
+        monkeypatch.setattr(pc, "run_house",
+                            lambda conn, refresh=False: calls.setdefault("house", (3, 4)))
         monkeypatch.delenv("START_DATE", raising=False)
         monkeypatch.delenv("END_DATE", raising=False)
         pc.main()
@@ -898,6 +934,29 @@ class TestMain:
         assert "senate done: 1 new filings, 2 new trades" in out
         assert "house done: 3 new filings, 4 new trades" in out
         assert calls == {"mig": True, "sen": (1, 2), "house": (3, 4)}
+
+    def test_refresh_house_env_passed(self, monkeypatch, capsys):
+        monkeypatch.setattr(pc, "db_conn", lambda: FakeConn())
+        monkeypatch.setattr(pc, "run_migrations", lambda conn: None)
+        monkeypatch.setattr(pc, "run_senate", lambda conn, start=None, end=None: (0, 0))
+        seen = {}
+        monkeypatch.setattr(pc, "run_house",
+                            lambda conn, refresh=False: seen.update(refresh=refresh) or (0, 0))
+        monkeypatch.delenv("START_DATE", raising=False)
+        monkeypatch.delenv("END_DATE", raising=False)
+        monkeypatch.delenv("REFRESH_HOUSE", raising=False)
+        pc.main()
+        assert seen["refresh"] is False
+
+        for val in ("1", "true", "TRUE", "yes", "on"):
+            monkeypatch.setenv("REFRESH_HOUSE", val)
+            pc.main()
+            assert seen["refresh"] is True, val
+
+        for val in ("0", "false", "", "no", "off", "banana"):
+            monkeypatch.setenv("REFRESH_HOUSE", val)
+            pc.main()
+            assert seen["refresh"] is False, val
 
     def test_error_exits(self, monkeypatch, capsys):
         monkeypatch.setattr(pc, "db_conn", lambda: FakeConn())
