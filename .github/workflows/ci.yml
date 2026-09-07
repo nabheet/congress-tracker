@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-typecheck:
+    name: Lint & typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.10"
+
+      - name: Sync deps (frozen)
+        run: uv sync --frozen --no-dev
+
+      - name: Byte-compile
+        run: uv run python -m py_compile pull_congress.py
+
+      - name: Type check
+        run: uv run pyright pull_congress.py
+
+  build-image:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t congress-pull:ci .
+
+      - name: Verify supercronic present
+        run: docker run --rm --entrypoint /usr/local/bin/supercronic congress-pull:ci -version
