@@ -74,6 +74,7 @@ Environment variables (see `.env.example`):
 | `HOUSE_PUBLIC` | `https://disclosures-clerk.house.gov/public_disc` | House public disclosure dir (ZIP index + PDFs) |
 | `DAYS_BACK` | `30` | Rolling window of Senate days to pull when no explicit range |
 | `START_DATE` / `END_DATE` | — | Explicit ISO date range (overrides `DAYS_BACK`; Senate only) |
+| `REFRESH_HOUSE` | `0` | Boolean (`1`/`true`/`yes`/`on`); re-parse existing House PTR filings and replace their trades (see backfills below) |
 | `MIGRATIONS_DIR` | `migrations` | Directory of `.sql` migration files |
 
 ## Data coverage and backfills
@@ -98,6 +99,22 @@ START_DATE=2025-01-01 END_DATE=2026-12-31 uv run python pull_congress.py
 ```
 
 A quarterly backfill (every ~3 months) is a reasonable cadence.
+
+### Re-parsing House PTR filings
+
+House comments are joined across continuation lines during parsing. Filings
+stored by an older image can hold truncated comments; the daily pull skips
+filings that already have trades, so redeploying does not heal them. Force a
+full House re-parse with:
+
+```sh
+REFRESH_HOUSE=1 uv run python pull_congress.py
+```
+
+Each PTR is re-downloaded, re-parsed, and its trades replaced (per-filing
+DELETE + insert); filings that fail to parse keep their existing rows. The
+cron schedule never sets this. See `docs/backfill.md` for details and a
+targeted (single-filing) alternative.
 
 ## Deploying
 
