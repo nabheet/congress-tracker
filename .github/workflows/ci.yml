@@ -72,21 +72,31 @@ jobs:
             # main push: auto-increment patch from the highest existing
             # vX.Y.Z tag on GHCR (registry-derived, like the npm stable
             # publish — never trust a possibly-stale local version).
-            # Uses the registry tags API: public images need no auth token
-            # (the GitHub packages API requires packages:read scope, which
-            # GITHUB_TOKEN with packages:write alone does not grant).
+            # GHCR requires a bearer token even for public images (anonymous
+            # tags/list returns 401). The anonymous pull token works with no
+            # credentials; the GitHub packages API would need packages:read
+            # scope, which GITHUB_TOKEN with packages:write alone lacks.
             REG_NAME="${IMG#ghcr.io/}"
-            JSON=$(curl -fsSL \
-                "https://ghcr.io/v2/${REG_NAME}/tags/list" 2>/dev/null || echo "{}")
-            HIGHEST=$(printf '%s' "$JSON" | jq -r '
-                [ .tags[]? // empty
-                  | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")) ]
-                | sort | last // empty' 2>/dev/null)
-            if [[ -z "$HIGHEST" ]]; then
+            REG_TOKEN=$(curl -fsSL \
+                "https://ghcr.io/token?scope=repository:${REG_NAME}:pull" \
+                2>/dev/null | jq -r '.token // empty')
+            if [[ -z "$REG_TOKEN" ]]; then
+              echo "WARN: could not get GHCR token; falling back to v0.1.0"
               NEXT="v0.1.0"
             else
-              NEXT=$(printf '%s' "$HIGHEST" \
-                  | awk -F. '{printf "v%d.%d.%d", $1+0, $2+0, $3+1}')
+              JSON=$(curl -fsSL \
+                  -H "Authorization: Bearer ${REG_TOKEN}" \
+                  "https://ghcr.io/v2/${REG_NAME}/tags/list" 2>/dev/null || echo "{}")
+              HIGHEST=$(printf '%s' "$JSON" | jq -r '
+                  [ .tags[]? // empty
+                    | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")) ]
+                  | sort | last // empty' 2>/dev/null)
+              if [[ -z "$HIGHEST" ]]; then
+                NEXT="v0.1.0"
+              else
+                NEXT=$(printf '%s' "$HIGHEST" \
+                    | awk -F. '{printf "v%d.%d.%d", $1+0, $2+0, $3+1}')
+              fi
             fi
             TAGS="${IMG}:${NEXT},${IMG}:latest,${IMG}:sha-${SHORT_SHA}"
           fi
