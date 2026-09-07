@@ -202,6 +202,15 @@ def senate_filing_trades(s, uuid):
     """
     url = f"{SENATE_BASE}/search/view/ptr/{uuid}/"
     text, _ = s.request(url)
+    return senate_trades_from_html(text)
+
+
+def senate_trades_from_html(text):
+    """Parse the PTR print-view HTML table into raw transaction rows.
+
+    Pure function (no I/O): given the HTML of a filing's print view, return
+    the non-header rows as lists of cell strings. Paper filings return [].
+    """
     rows = []
     for m in re.finditer(r"<tr[^>]*>(.*?)</tr>", text, re.S | re.I):
         cells = [html.unescape(re.sub(r"<[^>]+>", "", c)).strip()
@@ -308,6 +317,18 @@ def house_ptr_trades(s, pdf_url):
         return []
     if not text.strip():
         print(f"house: no text layer (scanned?) {pdf_url}", flush=True)
+        return []
+    return house_trades_from_text(text)
+
+
+def house_trades_from_text(text):
+    """Parse PTR transactions from the extracted PDF text layer.
+
+    Pure function (no I/O): accepts the raw text of a filing's PDF pages and
+    returns the list of trade dicts. Empty/scanned (no text layer) input
+    yields [] so callers can log and move on.
+    """
+    if not text.strip():
         return []
     lines = []
     for l in text.splitlines():

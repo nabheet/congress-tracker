@@ -32,6 +32,23 @@ jobs:
       - name: Type check
         run: uv run pyright pull_congress.py
 
+  test:
+    name: Test & coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.10"
+
+      - name: Sync deps (frozen, dev group)
+        run: uv sync --frozen
+
+      - name: Run tests with coverage gate
+        run: uv run pytest tests/ --cov=pull_congress --cov-report=term-missing --cov-fail-under=90
+
   build-image:
     name: Build Docker image
     runs-on: ubuntu-latest
@@ -47,7 +64,7 @@ jobs:
   publish-image:
     name: Publish Docker image
     if: github.event_name == 'push'
-    needs: [lint-and-typecheck, build-image]
+    needs: [lint-and-typecheck, test, build-image]
     runs-on: ubuntu-latest
     permissions:
       contents: write
