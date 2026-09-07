@@ -50,7 +50,7 @@ jobs:
     needs: [lint-and-typecheck, build-image]
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
     steps:
       - uses: actions/checkout@v4
@@ -91,6 +91,14 @@ jobs:
           fi
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
           echo "Resolved tags: ${TAGS}"
+          # The version to tag/release on GitHub (same version as the GHCR tag)
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            REL_TAG="$GITHUB_REF_NAME"
+          else
+            REL_TAG="$NEXT"
+          fi
+          echo "release_tag=${REL_TAG}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${REL_TAG}"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -105,3 +113,28 @@ jobs:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+
+      - name: Create GitHub release
+        if: steps.meta.outputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.meta.outputs.release_tag }}"
+          # Idempotent: skip if this tag already has a release (rerun, or a
+          # manually created release won the race).
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $TAG already exists; skipping"
+            exit 0
+          fi
+          ARGS=(--title "$TAG" --generate-notes)
+          # Pre-release tags (contain a hyphen) are marked prerelease on GitHub.
+          if [[ "$TAG" == *-* ]]; then
+            ARGS+=(--prerelease)
+          fi
+          # main push: the tag does not exist yet, so create it at this SHA.
+          # tag push: the tag already exists, so only create the release.
+          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
+            ARGS+=(--target "$GITHUB_SHA")
+          fi
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" "${ARGS[@]}"
+          echo "created GitHub release $TAG"
