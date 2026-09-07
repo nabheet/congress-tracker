@@ -13,40 +13,51 @@ rows — they must be re-parsed explicitly.
 - A parser fix changes how comments are extracted and you want existing
   filings re-processed.
 
-## How it works
+## Why a normal pull doesn't heal them
 
-`upsert_filing` returns `False` for filings that already exist, and the main
-loop does `continue  # already have it` — so a normal pull never re-parses
-known filings. A backfill must force a re-parse of a specific filing's PDF
-and replace its stored trades.
+`run_house` tracks `done` = `SELECT DISTINCT filing_id FROM trades` and skips
+any filing already in that set. Re-running the pull therefore never re-parses
+a PDF that already produced trades — the stale rows stay put.
 
-## Procedure (one-off)
+## Procedure (one-off, manual)
 
-Run inside the container with network + DB access:
+Run inside a container with network + DB access:
 
-```sh
-docker exec -it <home_container> python - <<'EOF'
+```python
 import pull_congress as pc
+from pull_congress import db_conn, Session
 
 # 1. Pick the filings to re-parse (e.g. by truncated comments):
-#    SELECT filing_id FROM trades
-#    WHERE raw->>'comment' LIKE '%...%' AND ...
+#    SELECT filing_id FROM trades WHERE raw->>'comment' LIKE '%...' ...
+
 ids = ["20026590", "20032149", "20033725", "20030630", "20034351"]
 
-with pc.Session() as s, s.cursor() as cur:
-    for fid in ids:
-        filing = pc.fetch_house_filing(cur, fid)      # row incl. raw_url
-        trades = pc.parse_house_filing(s, filing)     # re-downloads + parses PDF
-        pc.delete_trades(cur, fid)                    # remove stale rows
-        pc.insert_trades(cur, fid, trades)            # insert fresh rows
-        print(fid, len(trades))
-EOF
+conn = db_conn()
+s = Session()
+for fid in ids:
+    cur = conn.cursor()
+    cur.execute("SELECT raw_url FROM filings WHERE id = %s", (fid,))
+    row = cur.fetchone()
+    if not row:
+        continue
+    trades = pc.house_ptr_trades(s, row[0])   # re-downloads + parses PDF
+    if trades:
+        cur.execute("DELETE FROM trades WHERE filing_id = %s", (fid,))
+        pc.insert_trades(cur, fid, trades)
+        conn.commit()
+    print(fid, len(trades))
+conn.close()
 ```
 
-Replace `fetch_house_filing` / `parse_house_filing` / `delete_trades` with the
-actual function names in `pull_congress.py` if they differ; the pattern is:
-fetch the filing row, re-parse its PDF with the current parser, delete old
-trades for that filing, insert the new ones.
+Notes:
+
+- `house_ptr_trades(s, pdf_url)` is the pure parser entry point (network via
+  `Session`). It returns a list of trade dicts including `comment`.
+- The `DELETE` + `insert_trades` replace the stale rows atomically per
+  filing. There is no upsert-on-trades key, so delete-then-insert is
+  required.
+- `run_house`'s `done` set would also skip these filings, so the manual loop
+  above is the only path that touches them.
 
 ## When this is needed again
 
