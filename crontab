@@ -1,0 +1,4 @@
+# Congress tracker — daily pull. Supercronic reads this; logs go to stdout
+# (visible via `docker service logs <service>`).
+# 08:00 UTC = 04:00 ET / 01:00 PT — before Senate eFD business-hours load.
+0 8 * * * cd /app && python3 pull_congress.py
