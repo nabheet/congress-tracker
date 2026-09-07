@@ -59,8 +59,6 @@ jobs:
         id: meta
         run: |
           IMG="ghcr.io/${GITHUB_REPOSITORY,,}"
-          PKG="${GITHUB_REPOSITORY#*/}"
-          PKG="${PKG,,}"
           SHORT_SHA="${GITHUB_SHA::7}"
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             if [[ "$GITHUB_REF_NAME" == *-* ]]; then
@@ -74,11 +72,14 @@ jobs:
             # main push: auto-increment patch from the highest existing
             # vX.Y.Z tag on GHCR (registry-derived, like the npm stable
             # publish — never trust a possibly-stale local version).
+            # Uses the registry tags API: public images need no auth token
+            # (the GitHub packages API requires packages:read scope, which
+            # GITHUB_TOKEN with packages:write alone does not grant).
+            REG_NAME="${IMG#ghcr.io/}"
             JSON=$(curl -fsSL \
-                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-                "https://api.github.com/user/packages/container/${PKG}/versions?per_page=100" 2>/dev/null || echo "{}")
+                "https://ghcr.io/v2/${REG_NAME}/tags/list" 2>/dev/null || echo "{}")
             HIGHEST=$(printf '%s' "$JSON" | jq -r '
-                [ .[]?.metadata.container.tags[]? // empty
+                [ .tags[]? // empty
                   | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")) ]
                 | sort | last // empty' 2>/dev/null)
             if [[ -z "$HIGHEST" ]]; then
