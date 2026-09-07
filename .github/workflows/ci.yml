@@ -61,7 +61,13 @@ jobs:
           IMG="ghcr.io/${GITHUB_REPOSITORY,,}"
           SHORT_SHA="${GITHUB_SHA::7}"
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
-            TAGS="${IMG}:${GITHUB_REF_NAME},${IMG}:latest"
+            if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+              # pre-release tag (contains a hyphen, e.g. v0.2.0-beta.1) —
+              # own tag only, do NOT bump `latest`
+              TAGS="${IMG}:${GITHUB_REF_NAME}"
+            else
+              TAGS="${IMG}:${GITHUB_REF_NAME},${IMG}:latest"
+            fi
           else
             TAGS="${IMG}:latest,${IMG}:sha-${SHORT_SHA}"
           fi
