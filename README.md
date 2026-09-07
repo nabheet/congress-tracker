@@ -40,6 +40,7 @@ crontab            schedule (supercronic format)
 pyproject.toml     project + pinned runtime deps
 uv.lock            lockfile (frozen installs)
 .env.example       template for local config (copy to .env)
+docs/backfill.md   re-parsing filings with stale comment data
 ```
 
 ## Running locally
