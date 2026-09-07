@@ -791,7 +791,8 @@ def main():
             run_migrations(conn)
             nf, nt = run_senate(conn, start=start, end=end)
             log(f"senate done: {nf} new filings, {nt} new trades")
-            hf, ht = run_house(conn, refresh=os.environ.get("REFRESH_HOUSE") == "1")
+            refresh = os.environ.get("REFRESH_HOUSE", "").lower() in ("1", "true", "yes", "on")
+            hf, ht = run_house(conn, refresh=refresh)
             log(f"house done: {hf} new filings, {ht} new trades")
     except Exception as e:
         log(f"ERROR: {e!r}")

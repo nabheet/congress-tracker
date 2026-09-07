@@ -948,9 +948,15 @@ class TestMain:
         pc.main()
         assert seen["refresh"] is False
 
-        monkeypatch.setenv("REFRESH_HOUSE", "1")
-        pc.main()
-        assert seen["refresh"] is True
+        for val in ("1", "true", "TRUE", "yes", "on"):
+            monkeypatch.setenv("REFRESH_HOUSE", val)
+            pc.main()
+            assert seen["refresh"] is True, val
+
+        for val in ("0", "false", "", "no", "off", "banana"):
+            monkeypatch.setenv("REFRESH_HOUSE", val)
+            pc.main()
+            assert seen["refresh"] is False, val
 
     def test_error_exits(self, monkeypatch, capsys):
         monkeypatch.setattr(pc, "db_conn", lambda: FakeConn())
