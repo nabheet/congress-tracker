@@ -815,11 +815,12 @@ def run_senate(conn, start=None, end=None):
 def main():
     log = lambda msg: print(f"{datetime.now().isoformat()} {msg}", flush=True)
     start = end = None
+    days_back = os.environ.get("DAYS_BACK", "30")
     if os.environ.get("START_DATE"):
         start = date.fromisoformat(os.environ["START_DATE"])
     if os.environ.get("END_DATE"):
         end = date.fromisoformat(os.environ["END_DATE"])
-    log(f"starting (start={start} end={end} days_back={os.environ.get("DAYS_BACK", "30")})")
+    log(f"starting (start={start} end={end} days_back={days_back})")
     try:
         with db_conn() as conn:
             run_migrations(conn)
