@@ -352,6 +352,17 @@ class TestHouseParserEdgeCases:
         trades = pc.house_trades_from_text(text)
         assert trades[0]["comment"] is None
 
+    def test_boundary_stops_comment_scan(self):
+        # A boundary line (here the next filing's "Name:" label) must stop the
+        # comment locator so a D: line from the following filing is not
+        # absorbed into the previous trade's comment.
+        text = ("P 09/01/2026 09/05/2026 $1,001 - $15,000\n"
+                "Name: Jane Smith\n"
+                "D: belongs to the next filing\n"
+                "P 09/02/2026 09/06/2026 $1,001 - $15,000\n")
+        trades = pc.house_trades_from_text(text)
+        assert trades[0]["comment"] is None
+
 
 # ---------------------------------------------------------------- house index
 
