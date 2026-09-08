@@ -168,11 +168,11 @@ def senate_report_list(s, submitted_start, submitted_end, start=0, length=100):
         "order[1][column]": "0", "order[1][dir]": "asc",
         "start": str(start), "length": str(length),
         "search[value]": "", "search[regex]": "false",
-        "report_types": "[11]",           # 11 = Periodic Transaction Report (PTR)
-        "filer_types": "[1]",             # Server IGNORES filer_types/report_types (verified 2026-09-06:
-                                          # every value, incl. "[4]" candidates / "[5]" former senators,
-                                          # returns identical record counts). Kept for compatibility with
-                                          # the site's own payload shape.
+        "report_types": "[11]",           # Inert: the server ignores filer_types/report_types
+        "filer_types": "[1]",             # (verified 2026-09-06: every value, incl. "[4]" candidates /
+                                          # "[5]" former senators, returns identical record counts).
+                                          # "[11]" is the site's own PTR value; both are kept verbatim
+                                          # only because the endpoint rejects payloads that omit them.
         "submitted_start_date": submitted_start,   # MM/DD/YYYY HH:MM:SS
         "submitted_end_date": submitted_end,       # empty = no upper bound
         "candidate_state": "", "senator_state": "", "office_id": "",
@@ -350,6 +350,15 @@ def house_trades_from_text(text):
     trades = []
     i = 0
     n = len(lines)
+    # Index roles across this parser: `i` is the anchor line (carries the
+    # TXN_RE: type code + both dates + amount). Because pdfplumber wraps each
+    # logical table row across 2-4 lines, the fields around an anchor can
+    # spill onto neighbors, so three separate forward/backward cursors walk
+    # the lines around `i`:
+    #   `j` — amount continuation (second half of a split amount range);
+    #   `k` — the S O: owner line, asset text, and the D: comment block.
+    # All three stop at a TXN_RE (next anchor) or a BOUNDARY_RE (a label /
+    # filing-boundary line) so a wrapped row never bleeds into the next one.
     while i < n:
         m = TXN_RE.search(lines[i])
         if not m:
@@ -489,8 +498,9 @@ def house_trades_from_text(text):
                     comment = " ".join([comment, lk.strip()]).strip()
                     k += 1
                 break
-            if TXN_RE.search(lines[k]) or lines[k].startswith(
-                    ("* For the complete list", "I CERTIFY", "Digitally Signed")):
+            if TXN_RE.search(lines[k]) or BOUNDARY_RE.search(lines[k]) or \
+                    lines[k].startswith(
+                        ("* For the complete list", "I CERTIFY", "Digitally Signed")):
                 break
             k += 1
 
@@ -688,10 +698,15 @@ def run_migrations(conn):
             continue
         with open(os.path.join(MIGRATIONS_DIR, f)) as fh:
             sql = fh.read()
-        with conn.cursor() as cur:
-            cur.execute(sql)
-            cur.execute("INSERT INTO schema_version (version) VALUES (%s)", (f,))
-        conn.commit()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                cur.execute("INSERT INTO schema_version (version) VALUES (%s)", (f,))
+            conn.commit()
+        except Exception as e:
+            # Transaction is rolled back (no commit) so schema_version is
+            # untouched; surface which migration failed for fast triage.
+            raise RuntimeError(f"migration {f} failed (rolled back): {e!r}") from e
         print(f"applied migration {f}", flush=True)
     return len(applied)
 
