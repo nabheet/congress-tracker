@@ -289,6 +289,16 @@ OWNER_PREFIX_RE = re.compile(r"^(SP|JT|Self)\b\s*(.*)$", re.I)
 TICKER_RE = re.compile(r"\(([^()]*)\)\s*(\[[A-Z0-9]+\])?")
 CODE_RE = re.compile(r"\[([A-Z0-9]+)\]")
 TYPE_LABEL = {"P": "Purchase", "S": "Sale", "X": "Exchange", "E": "Exchange"}
+# Asset-name tails that end a code line but are not tickers ("HM Companies LLC
+# [OI]", "U.S. Treasury Bills [GS]", "... Rev Bonds [GS]"). Bare-ticker
+# candidates are additionally required to be ALL-CAPS (real tickers like "DIA",
+# "QQQ", "BRK.B" are), which rejects the title-case tails. This set covers the
+# all-caps tails that the case rule alone cannot reject.
+NON_TICKER_WORDS = {
+    "BILLS", "BONDS", "CORP", "ETF", "FUND", "INC", "LLC", "LP",
+    "NOTES", "STOCK", "TRUST", "UNITS", "CLASS", "WTS", "SHRS",
+    "DEP", "REIT", "ADR", "GDR", "CEF", "MF",
+}
 BOUNDARY_RE = re.compile(
     r"^(Filing ID|Name:|Status:|State/District:|ID Owner|Type Date|\$200\?|"
     r"\* For the complete list|I CERTIFY|Digitally Signed|Clerk of the House|"
@@ -428,7 +438,7 @@ def house_trades_from_text(text):
                         bt = re.search(
                             r"(?<![A-Za-z0-9.])([A-Za-z][A-Za-z0-9.]{0,4})\s*\[[A-Z0-9]+\]\s*$",
                             lk)
-                        if bt:
+                        if bt and bt.group(1).isupper() and bt.group(1) not in NON_TICKER_WORDS:
                             ticker = bt.group(1)
                 k += 1
                 break                      # a code line ends the asset block
@@ -452,7 +462,7 @@ def house_trades_from_text(text):
             bt = re.search(
                 r"(?<![A-Za-z0-9.])([A-Za-z][A-Za-z0-9.]{0,4})\s*\[[A-Z0-9]+\]\s*$",
                 asset_text)
-            if bt:
+            if bt and bt.group(1).isupper() and bt.group(1) not in NON_TICKER_WORDS:
                 ticker = bt.group(1)
         asset_name = CODE_RE.sub("", asset_text).strip(" ,-:")
         asset_name = re.sub(r"\s{2,}", " ", asset_name)
@@ -701,13 +711,21 @@ def upsert_filing(cur, filing):
 
 def insert_trades(cur, filing_id, trades):
     for t in trades:
+        txn = t.get("txn_date")
+        notif = t.get("notif_date")
+        # Zero-padded MM/DD/YYYY sorts lexicographically as chronological.
+        # A txn dated after its notification is impossible; flag it for review
+        # (source PDFs occasionally contain such typos) but store as-is.
+        if txn and notif and txn > notif:
+            print(f"WARN {filing_id}: txn {txn} after notif {notif} (check source)",
+                  flush=True)
         cur.execute(
             """INSERT INTO trades (filing_id, ticker, owner, transaction_type,
                                    amount_range, transaction_date, notification_date, raw)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                ON CONFLICT DO NOTHING""",
             (filing_id, t.get("ticker"), t.get("owner"), t.get("type"),
-             t.get("amount"), t.get("txn_date"), t.get("notif_date"),
+             t.get("amount"), txn, notif,
              json.dumps(t)),
         )
 
@@ -757,9 +775,10 @@ def run_senate(conn, start=None, end=None):
                 for cells in rows:
                     # [0]=#, [1]=txn date, [2]=owner, [3]=ticker, [4]=asset name,
                     # [5]=asset type, [6]=type, [7]=amount, [8]=comment
+                    ticker = cells[3] if cells[3] not in ("", "--") else None
                     trades.append({
                         "owner": cells[2],
-                        "ticker": cells[3],
+                        "ticker": ticker,
                         "asset_name": cells[4],
                         "asset_type": cells[5],
                         "type": cells[6],
