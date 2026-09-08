@@ -294,6 +294,45 @@ class TestHouseParserEdgeCases:
         assert trades[0]["ticker"] == "DIA"
         assert trades[0]["asset_type"] == "OT"
 
+    def test_asset_name_tail_not_ticker(self):
+        # "LLC" ends the code line but is not a ticker; the bare-ticker
+        # heuristic must reject it (and the asset name is kept intact).
+        text = ("HM Companies LLC [OI]\n"
+                "P 09/01/2026 09/05/2026 $1,001 - $15,000\n")
+        trades = pc.house_trades_from_text(text)
+        assert trades[0]["ticker"] is None
+        assert trades[0]["asset_name"] == "HM Companies LLC"
+
+    def test_bills_tail_not_ticker(self):
+        text = ("U.S. Treasury Bills [GS]\n"
+                "P 09/01/2026 09/05/2026 $1,001 - $15,000\n")
+        trades = pc.house_trades_from_text(text)
+        assert trades[0]["ticker"] is None
+        assert trades[0]["asset_name"] == "U.S. Treasury Bills"
+
+    def test_lowercase_tail_not_ticker(self):
+        # Lowercase tails ("Dog" from "Ski Mask Dog", "v.2" from
+        # "Pathfinder 360 v.2") are asset names, not tickers.
+        text = ("Ski Mask Dog [CT]\n"
+                "P 09/01/2026 09/05/2026 $1,001 - $15,000\n")
+        trades = pc.house_trades_from_text(text)
+        assert trades[0]["ticker"] is None
+        assert trades[0]["asset_name"] == "Ski Mask Dog"
+
+    def test_asset_text_bare_ticker_rejected_for_tail(self):
+        # Bare-ticker on the joined asset_text path also rejects tails.
+        text = ("P 09/01/2026 09/05/2026 $1,001 - $15,000\n"
+                "U.S. Treasury Bills [GS]\n")
+        trades = pc.house_trades_from_text(text)
+        assert trades[0]["ticker"] is None
+
+    def test_bare_ticker_in_asset_text_kept(self):
+        # A real all-caps bare ticker riding in the asset text is kept.
+        text = ("Invesco QQQ [OT]\n"
+                "P 09/01/2026 09/05/2026 $1,001 - $15,000\n")
+        trades = pc.house_trades_from_text(text)
+        assert trades[0]["ticker"] == "QQQ"
+
     def test_comment_continuation_lines(self):
         # Plain-text continuation lines join the comment; a second "D:" line
         # is excluded from BOUNDARY_RE (via "(?!D ?:)") and joins too, so
@@ -407,6 +446,32 @@ class TestInsertTrades:
         assert params[0] == "house:123"
         assert params[1] == "AAPL"
         assert json.loads(params[7])["type"] == "Purchase"
+
+    def test_warns_when_txn_after_notif(self, capsys):
+        # Impossible date order (txn after notification) is flagged for review
+        # but still stored as-is: the parser must not fabricate dates.
+        cur = FakeCursor()
+        trades = [
+            {"ticker": "AAPL", "owner": "Self", "type": "Purchase",
+             "amount": "$1,001 - $15,000", "txn_date": "12/26/2026",
+             "notif_date": "01/21/2026", "comment": None},
+        ]
+        pc.insert_trades(cur, "house:20033889", trades)
+        out = capsys.readouterr().out
+        assert "txn 12/26/2026 after notif 01/21/2026" in out
+        sql, params = cur.calls[0]
+        assert params[5] == "12/26/2026"  # stored unchanged
+        assert params[6] == "01/21/2026"
+
+    def test_no_warning_when_dates_in_order(self, capsys):
+        cur = FakeCursor()
+        trades = [
+            {"ticker": "AAPL", "owner": "Self", "type": "Purchase",
+             "amount": "$1,001 - $15,000", "txn_date": "09/01/2026",
+             "notif_date": "09/05/2026", "comment": None},
+        ]
+        pc.insert_trades(cur, "house:123", trades)
+        assert capsys.readouterr().out == ""
 
 
 # ---------------------------------------------------------------- Session._fetch
@@ -704,6 +769,34 @@ class TestRunSenate:
         assert cur_upsert.calls[1][0].startswith("INSERT INTO trades")
         # raw JSON payload stored with the trade
         assert json.loads(cur_upsert.calls[1][1][7])["ticker"] == "AAPL"
+
+    def test_dash_ticker_becomes_none(self, monkeypatch):
+        data_url = pc.SENATE_BASE + "/search/report/data/"
+        ptr_url = pc.SENATE_BASE + "/search/view/ptr/abc/"
+        dash_html = """
+<html><body><table>
+<tr><th>#</th><th>Transaction Date</th><th>Owner</th><th>Ticker</th>
+    <th>Asset Name</th><th>Asset Type</th><th>Type</th><th>Amount</th><th>Comment</th></tr>
+<tr><td>1</td><td>08/15/2026</td><td>Self</td><td>--</td><td>GOVT NOTES</td>
+    <td>Government Security</td><td>Purchase</td><td>$1,001 - $15,000</td><td></td></tr>
+</table></body></html>
+"""
+        fake = FakeSession(text_by_url={
+            data_url: json.dumps({"data": [[
+                "John", "Smith", "CA", '<a href="/search/view/ptr/abc/">View PTR</a>',
+                "09/01/2026"]]}),
+            ptr_url: dash_html,
+        })
+        monkeypatch.setattr(pc, "senate_session", lambda: fake)
+        monkeypatch.setattr(pc.time, "sleep", lambda s: None)
+        cur_upsert = FakeCursor(fetchone_result=(True,))
+        conn = FakeConn(cursors=[cur_upsert])
+        nf, nt = pc.run_senate(conn, start=None, end=date(2026, 9, 1))
+        assert nf == 1
+        assert nt == 1
+        trade = json.loads(cur_upsert.calls[1][1][7])
+        assert trade["ticker"] is None
+        assert trade["asset_name"] == "GOVT NOTES"
 
     def test_known_filing_skipped(self, monkeypatch):
         data_url = pc.SENATE_BASE + "/search/report/data/"
