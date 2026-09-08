@@ -35,10 +35,13 @@ schema: `filings` (natural-keyed, one per disclosure) and `trades`
 ```
 pull_congress.py   main script (fetch → parse → upsert)
 migrations/        versioned SQL migrations
+queries/           analysis SQL (see "Analyzing the data")
+tests/             unit tests (pure parsing + DB seams, no network/PDF)
 Dockerfile         container image
 crontab            schedule (supercronic format)
 pyproject.toml     project + pinned runtime deps
 uv.lock            lockfile (frozen installs)
+pyrightconfig.json pyright type-check config
 .env.example       template for local config (copy to .env)
 docs/backfill.md   re-parsing filings with stale comment data
 ```
