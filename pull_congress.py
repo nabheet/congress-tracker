@@ -604,8 +604,6 @@ def house_ptr_trades_columnar(lines):
                     comment = " ".join([comment, clk.strip()]).strip()
                     k += 1
                 break
-            if TXN_RE.search(lk):
-                break
             k += 1
         if amount is None:
             i += 1
@@ -687,7 +685,7 @@ def _tess_available():
     return shutil.which("tesseract") is not None
 
 
-def _render_ptr_pages(raw, scale=2.0):
+def _render_ptr_pages(raw, scale=2):
     """Render a PTR PDF's pages to PIL grayscale images via pypdfium2."""
     import pypdfium2 as pdfium
     from PIL import Image
@@ -695,7 +693,7 @@ def _render_ptr_pages(raw, scale=2.0):
     pages = []
     with pdfium.PdfDocument(raw) as doc:
         for page in doc:
-            img = page.render(scale=scale).to_pil()
+            img = page.render(scale=int(scale)).to_pil()
             pages.append(img.convert("L"))
     return pages
 
@@ -795,7 +793,7 @@ def _ocr_cell(img, box, psm=7, scale=2.0):
     crop = img.crop((x0, y0, x1, y1))
     if crop.size[0] < 4 or crop.size[1] < 4:
         return ""
-    crop = crop.resize((crop.size[0] * 2, crop.size[1] * 2), Image.LANCZOS)
+    crop = crop.resize((crop.size[0] * 2, crop.size[1] * 2), Image.Resampling.LANCZOS)
     # tesseract needs a real image file on stdin, not raw pixel bytes.
     buf = io.BytesIO()
     crop.save(buf, format="PNG")
