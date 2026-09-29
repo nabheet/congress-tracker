@@ -14,6 +14,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
 import time
 import urllib.error
@@ -312,7 +313,8 @@ def house_ptr_trades(s, pdf_url):
     """Download a PTR PDF and parse its transactions from the text layer.
 
     Returns a list of trade dicts. Scanned/image-only PDFs (no text layer)
-    yield [] and are logged so they can be revisited.
+    fall back to OCR when tesseract is available; otherwise they yield [] and
+    are logged so they can be revisited.
     """
     try:
         raw, _ = s.request_bytes(pdf_url)
@@ -327,7 +329,7 @@ def house_ptr_trades(s, pdf_url):
         return []
     if not text.strip():
         print(f"house: no text layer (scanned?) {pdf_url}", flush=True)
-        return []
+        return house_ptr_trades_ocr(raw, pdf_url)
     return house_trades_from_text(text)
 
 
@@ -626,6 +628,340 @@ def house_ptr_trades_columnar(lines):
     return trades
 
 
+# OCR fallback for scanned House PTRs ----------------------------------------
+#
+# ~12% of House PTR PDFs (112/912) are image-only scans of the paper form with
+# no text layer, so pdfplumber extracts nothing. We render the page with
+# pypdfium2, detect the form's gridlines, OCR each data-row cell with
+# tesseract, detect checkbox marks by a diagonal-stroke signature, then
+# synthesize e-filed-format lines and feed them through the existing
+# house_trades_from_text() parser so output shape is identical. Every row is
+# tagged source="ocr" + confidence (high/medium/low); low-confidence rows are
+# logged for review and never silently ingested.
+#
+# The paper form is the standard "A-K" PTR table. Column layout (native scan
+# width fractions) and the 12 amount checkboxes were verified against the
+# official ethics.house.gov form and multiple real Clerk PTR scans.
+
+PTR_AMOUNT_RANGES = [
+    "$200 - $1,000",
+    "$1,001 - $15,000",
+    "$15,001 - $50,000",
+    "$50,001 - $100,000",
+    "$100,001 - $250,000",
+    "$250,001 - $500,000",
+    "$500,001 - $1,000,000",
+    "$1,000,001 - $5,000,000",
+    "$5,000,001 - $25,000,000",
+    "$25,000,001 - $50,000,000",
+    "Over $50,000,000",
+    "Over $1,000,000",        # wide box: spouse/dependent-child asset
+]
+
+# Column boundaries as fractions of the form's width. Index i gives the start
+# fraction of column i; a trailing 1.0 marks the right edge. Order (verified):
+# owner | ticker | asset | type P/S/X (3 boxes) | txn date | notif date |
+# 11 amount boxes | wide spouse/DC amount box.
+_PTR_COL_FRACS = [
+    0.0000,  # 0  left edge
+    0.0861,  # 1  owner | ticker        (146/1696)
+    0.1132,  # 2  ticker | asset        (192/1696)
+    0.2995,  # 3  asset | type          (508/1696)
+    0.3296,  # 4  type P | S            (559/1696)
+    0.3585,  # 5  type S | X            (608/1696)
+    0.3874,  # 6  type X | txn date     (657/1696)
+    0.4729,  # 7  txn | notif date      (802/1696)
+    0.5383,  # 8  notif | amount        (913/1696)
+    0.5743, 0.6097, 0.6450, 0.6810, 0.7158, 0.7512,
+    0.7860, 0.8213, 0.8567, 0.8921, 0.9269,  # amount box edges
+    1.0000,  # 20 right edge
+]
+# Expected number of vertical gridlines on the form (incl. left/right edges).
+_PTR_EXPECTED_GRIDLINES = len(_PTR_COL_FRACS)
+# Data-row band starts as fractions of the form's height (native 2200px).
+_PTR_ROW_FRACS = [0.6305, 0.6568, 0.6827, 0.7082, 0.7341]
+_PTR_HEADER_BOTTOM_FRAC = 0.614  # below this lie the data rows
+
+
+def _tess_available():
+    return shutil.which("tesseract") is not None
+
+
+def _render_ptr_pages(raw, scale=2.0):
+    """Render a PTR PDF's pages to PIL grayscale images via pypdfium2."""
+    import pypdfium2 as pdfium
+    from PIL import Image
+
+    pages = []
+    with pdfium.PdfDocument(raw) as doc:
+        for page in doc:
+            img = page.render(scale=scale).to_pil()
+            pages.append(img.convert("L"))
+    return pages
+
+
+def _detect_gridlines(img, vertical=True, min_frac=0.55):
+    """Detect long dark gridlines (table rules) in a rendered page.
+
+    Returns clustered line positions. For vertical lines, a column is a line
+    when its dark-pixel share of the row band exceeds min_frac; positions are
+    clustered so a 1-2px rule yields one coordinate.
+    """
+    w, h = img.size
+    px = img.load()
+    if vertical:
+        lo, hi = int(h * 0.55), int(h * 0.80)     # data-row band
+        scores = []
+        for x in range(w):
+            dark = sum(1 for y in range(lo, hi) if px[x, y] < 128)
+            scores.append(dark / (hi - lo))
+    else:
+        lo, hi = int(w * 0.05), int(w * 0.95)
+        scores = []
+        for y in range(h):
+            dark = sum(1 for x in range(lo, hi) if px[x, y] < 128)
+            scores.append(dark / (hi - lo))
+    lines = []
+    in_line = False
+    start = 0
+    for i, s in enumerate(scores):
+        if s >= min_frac and not in_line:
+            start = i
+            in_line = True
+        elif s < min_frac and in_line:
+            lines.append((start + i - 1) / 2)
+            in_line = False
+    if in_line:
+        lines.append((start + len(scores) - 1) / 2)
+    return lines
+
+
+def _ptr_layout(img):
+    """Map the form layout onto a rendered page; verify against gridlines.
+
+    Returns (col_boxes, row_bands, structural_ok) where col_boxes is a list of
+    (x0, x1) per column and row_bands is a list of (y0, y1) data-row bands.
+    structural_ok is False when detected gridlines deviate from the standard
+    form (whole filing should be flagged low-confidence).
+    """
+    w, h = img.size
+    cols = []
+    for i in range(len(_PTR_COL_FRACS) - 1):
+        cols.append((int(_PTR_COL_FRACS[i] * w), int(_PTR_COL_FRACS[i + 1] * w)))
+
+    vlines = _detect_gridlines(img, vertical=True)
+    structural_ok = True
+    if vlines:
+        # Compare count, then mean position error of the interior gridlines.
+        if abs(len(vlines) - _PTR_EXPECTED_GRIDLINES) > 2:
+            structural_ok = False
+        else:
+            expected = [_PTR_COL_FRACS[i] * w for i in range(1, len(_PTR_COL_FRACS) - 1)]
+            # Match detected lines to expected positions by nearest fraction.
+            errs = []
+            for ex in expected:
+                if vlines:
+                    nearest = min(vlines, key=lambda v: abs(v - ex))
+                    errs.append(abs(nearest - ex) / w)
+            if errs and sum(errs) / len(errs) > 0.03:
+                structural_ok = False
+
+    hlines = _detect_gridlines(img, vertical=False)
+    header_bottom = int(_PTR_HEADER_BOTTOM_FRAC * h)
+    rows = [r for r in hlines if r > header_bottom]
+    row_bands = []
+    if len(rows) >= 2:
+        # Adjacent rules delimit a band; take the tight pairs as data rows.
+        for a, b in zip(rows, rows[1:]):
+            row_bands.append((int(a), int(b)))
+    else:
+        # Fall back to the standard row pitch.
+        row_bands = [(int(_PTR_ROW_FRACS[i] * h), int(_PTR_ROW_FRACS[i + 1] * h))
+                     for i in range(len(_PTR_ROW_FRACS) - 1)]
+        structural_ok = False
+    return cols, row_bands, structural_ok
+
+
+def _ocr_cell(img, box, psm=7, scale=2.0):
+    """OCR a crop with tesseract (stdin), returning cleaned text.
+
+    Cleans gridline bleed: scanned forms often include the cell's rule line
+    at the crop edge, which tesseract reads as a stray '|' or run of dashes.
+    """
+    from PIL import Image
+    import subprocess
+
+    x0, y0, x1, y1 = box
+    crop = img.crop((x0, y0, x1, y1))
+    if crop.size[0] < 4 or crop.size[1] < 4:
+        return ""
+    crop = crop.resize((crop.size[0] * 2, crop.size[1] * 2), Image.LANCZOS)
+    # tesseract needs a real image file on stdin, not raw pixel bytes.
+    buf = io.BytesIO()
+    crop.save(buf, format="PNG")
+    proc = subprocess.run(
+        ["tesseract", "stdin", "stdout", "--psm", str(psm)],
+        input=buf.getvalue(), capture_output=True, timeout=20)
+    text = proc.stdout.decode("utf-8", "replace").strip()
+    text = re.sub(r"\s+", " ", text)
+    # strip rule-line bleed: leading/trailing pipes, dashes, colons, bars
+    text = re.sub(r"^[\s|:,.\-]+", "", text)
+    text = re.sub(r"[\s|:,.\-]+$", "", text)
+    return text
+
+
+def _normalize_ocr_date(s):
+    """Normalize an OCR'd date ('7/30/26', '07/30/2026') to MM/DD/YYYY."""
+    m = re.search(r"(\d{1,2})[/.](\d{1,2})[/.](\d{2,4})", s)
+    if not m:
+        return None
+    mo, d, y = m.groups()
+    if len(y) == 2:
+        y = "20" + y
+    return f"{int(mo):02d}/{int(d):02d}/{y}"
+
+
+def _box_score(img, x0, y0, x1, y1, inset=10):
+    """Fraction of interior dark pixels lying on/near either diagonal.
+
+    Checkbox marks (X or fill) darken the box diagonals; an empty box only has
+    its frame, which the inset excludes.
+    """
+    px = img.load()
+    x0i, y0i = x0 + inset, y0 + inset
+    x1i, y1i = x1 - inset, y1 - inset
+    if x1i <= x0i or y1i <= y0i:
+        return 0.0
+    dark_on_diag = 0
+    dark_total = 0
+    wbox = x1i - x0i
+    hbox = y1i - y0i
+    for yy in range(y0i, y1i):
+        for xx in range(x0i, x1i):
+            if px[xx, yy] < 128:
+                dark_total += 1
+                # distance to main diagonal (top-left -> bottom-right)
+                d_main = abs((yy - y0i) * wbox - (xx - x0i) * hbox) / (wbox + hbox)
+                d_anti = abs((yy - y0i) * wbox - (x1i - xx) * hbox) / (wbox + hbox)
+                if d_main <= 1.5 or d_anti <= 1.5:
+                    dark_on_diag += 1
+    return dark_on_diag / dark_total if dark_total else 0.0
+
+
+def _pick_checked(scores, min_score=0.10, min_margin=0.15):
+    """Pick the marked checkbox in a group by diagonal-score argmax.
+
+    Returns (index, ok). ok=False when the best score is too weak or the
+    margin over the runner-up is too thin to be trustworthy.
+    """
+    if not scores:
+        return None, False
+    best = max(range(len(scores)), key=lambda i: scores[i])
+    if scores[best] < min_score:
+        return None, False
+    rest = sorted((scores[i] for i in range(len(scores)) if i != best), reverse=True)
+    margin = (scores[best] - rest[0]) / scores[best] if rest and scores[best] else 1.0
+    if margin < min_margin:
+        return best, False
+    return best, True
+
+
+def _ocr_owner(text):
+    t = text.upper()
+    if "SP" in t:
+        return "Spouse"
+    if "DC" in t:
+        return "Dependent Child"
+    if "JT" in t:
+        return "Joint"
+    return "Self"
+
+
+def house_ptr_trades_ocr(raw, pdf_url):
+    """Extract trades from a scanned (image-only) House PTR PDF via OCR.
+
+    Returns a list of trade dicts with source="ocr" and a confidence score.
+    Low-confidence rows are included here but filtered by the caller.
+    """
+    if not _tess_available():
+        print(f"house: tesseract not installed; skipping OCR {pdf_url}", flush=True)
+        return []
+    try:
+        pages = _render_ptr_pages(raw)
+    except Exception as e:
+        print(f"house: ocr render failed {pdf_url}: {e!r}", flush=True)
+        return []
+
+    trades = []
+    for page_idx, img in enumerate(pages):
+        cols, row_bands, structural_ok = _ptr_layout(img)
+        type_boxes = [cols[3], cols[4], cols[5]]          # P, S, X
+        amount_boxes = cols[8:]                            # 11 narrow + wide
+        if len(amount_boxes) != 12 or len(type_boxes) != 3:
+            structural_ok = False
+
+        for (y0, y1) in row_bands:
+            asset = _ocr_cell(img, (cols[2][0], y0, cols[2][1], y1)).strip(" ,-:")
+            ticker_text = _ocr_cell(img, (cols[1][0], y0, cols[1][1], y1))
+            owner_text = _ocr_cell(img, (cols[0][0], y0, cols[0][1], y1))
+            txn_text = _ocr_cell(img, (cols[6][0], y0, cols[6][1], y1))
+            notif_text = _ocr_cell(img, (cols[7][0], y0, cols[7][1], y1))
+
+            type_scores = [_box_score(img, bx[0], y0, bx[1], y1) for bx in type_boxes]
+            type_idx, type_ok = _pick_checked(type_scores)
+            amt_scores = [_box_score(img, bx[0], y0, bx[1], y1) for bx in amount_boxes]
+            amt_idx, amt_ok = _pick_checked(amt_scores)
+
+            # Skip empty rows: no marks anywhere and no asset text.
+            if not asset and type_idx is None and amt_idx is None and not ticker_text:
+                continue
+
+            txn_date = _normalize_ocr_date(txn_text)
+            notif_date = _normalize_ocr_date(notif_text)
+            owner = _ocr_owner(owner_text)
+            code = ("P", "S", "X")[type_idx] if type_idx is not None else None
+            ticker = ticker_text.strip("() ") if ticker_text.strip() else None
+            if ticker and not re.fullmatch(r"[A-Z][A-Z0-9.]{0,4}", ticker):
+                ticker = None
+
+            confidence = "high"
+            if (not structural_ok or not asset or not txn_date or not notif_date
+                    or not type_ok or not amt_ok):
+                confidence = "low"
+            elif ticker is None or owner == "Self" and not owner_text.strip():
+                confidence = "medium"
+
+            if code is None:
+                continue   # unreadable type code: skip, log below
+
+            amt_label = PTR_AMOUNT_RANGES[amt_idx] if amt_idx is not None else None
+            if amt_label is None:
+                confidence = "low"
+                continue
+            # Build an e-filed-format line the standard parser understands.
+            # TXN_RE needs a plain numeric anchor, so "Over"/spouse-DC boxes
+            # are patched in afterwards.
+            anchor_amt = re.sub(r"^Over\s+", "", amt_label)
+            line = (f"{asset} {code} {txn_date} {notif_date} {anchor_amt}"
+                    if ticker is None else
+                    f"{asset} ({ticker}) {code} {txn_date} {notif_date} {anchor_amt}")
+            parsed = house_trades_from_text(line)
+            if not parsed:
+                confidence = "low"
+                continue
+            t = parsed[0]
+            t["owner"] = owner
+            t["amount"] = amt_label
+            t["source"] = "ocr"
+            t["confidence"] = confidence
+            t["pdf_page"] = page_idx
+            trades.append(t)
+            if confidence == "low":
+                print(f"house: LOW-CONFIDENCE OCR row {pdf_url} p{page_idx}: "
+                      f"{t!r}", flush=True)
+    return trades
+
+
 def run_house(conn, years=None, refresh=False):
     """Pull House filings from the Clerk's bulk index ZIPs and parse PTR trades.
 
@@ -661,6 +997,17 @@ def run_house(conn, years=None, refresh=False):
             if not filing["is_ptr"] or filing["id"] in done:
                 continue
             trades = house_ptr_trades(s, filing["raw_url"])
+            if trades:
+                # OCR rows never silently ingested: low-confidence ones are
+                # logged for review and skipped.
+                low = [t for t in trades
+                       if t.get("source") == "ocr" and t.get("confidence") == "low"]
+                ingest = [t for t in trades if t not in low]
+                for t in low:
+                    print(f"house: SKIP low-confidence OCR {filing['id']}: "
+                          f"{t.get('asset_name')!r} {t.get('type')} "
+                          f"{t.get('txn_date')} {t.get('amount')}", flush=True)
+                trades = ingest
             if trades:
                 with conn.cursor() as cur:
                     if refresh:

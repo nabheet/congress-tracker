@@ -687,6 +687,109 @@ class TestHousePtrTrades:
         assert trades[0]["ticker"] == "AAPL"
 
 
+# ---------------------------------------------------------------- house PTR OCR
+
+class TestHousePtrOcr:
+    def test_normalize_ocr_date_variants(self):
+        assert pc._normalize_ocr_date("7/30/26") == "07/30/2026"
+        assert pc._normalize_ocr_date("07/30/2026") == "07/30/2026"
+        assert pc._normalize_ocr_date("8/19/26") == "08/19/2026"
+        assert pc._normalize_ocr_date("1.5.28") == "01/05/2028"
+        assert pc._normalize_ocr_date("junk") is None
+        assert pc._normalize_ocr_date("") is None
+
+    def test_pick_checked_clear_winner(self):
+        idx, ok = pc._pick_checked([0.0, 0.9, 0.1])
+        assert idx == 1 and ok is True
+
+    def test_pick_checked_all_weak(self):
+        idx, ok = pc._pick_checked([0.05, 0.04])
+        assert idx is None and ok is False
+
+    def test_pick_checked_thin_margin(self):
+        # margin (0.4-0.35)/0.4 = 0.125 < 0.15 -> flagged unreliable
+        idx, ok = pc._pick_checked([0.4, 0.35])
+        assert idx == 0 and ok is False
+
+    def test_pick_checked_empty(self):
+        assert pc._pick_checked([]) == (None, False)
+
+    def test_ocr_owner_mapping(self):
+        assert pc._ocr_owner("SP") == "Spouse"
+        assert pc._ocr_owner("DC") == "Dependent Child"
+        assert pc._ocr_owner("JT") == "Joint"
+        assert pc._ocr_owner("") == "Self"
+        assert pc._ocr_owner("john") == "Self"
+        assert pc._ocr_owner("OS") == "Self"   # not a prefix match
+
+    def test_amount_ranges_are_twelve(self):
+        assert len(pc.PTR_AMOUNT_RANGES) == 12
+        assert pc.PTR_AMOUNT_RANGES[0] == "$200 - $1,000"
+        assert pc.PTR_AMOUNT_RANGES[-1] == "Over $1,000,000"
+        assert pc.PTR_AMOUNT_RANGES[-2] == "Over $50,000,000"
+
+    def test_box_score_detects_x_mark(self):
+        from PIL import Image, ImageDraw
+        img = Image.new("L", (60, 60), 255)
+        d = ImageDraw.Draw(img)
+        # empty box frame
+        d.rectangle([10, 10, 50, 50], outline=0, width=2)
+        empty = pc._box_score(img, 10, 10, 50, 50)
+        # X mark inside
+        d.line([10, 10, 50, 50], fill=0, width=3)
+        d.line([50, 10, 10, 50], fill=0, width=3)
+        marked = pc._box_score(img, 10, 10, 50, 50)
+        assert marked > empty
+        assert marked > 0.5
+
+    @pytest.mark.skipif(not pc._tess_available(), reason="tesseract not installed")
+    def test_ocr_cell_strips_rule_line(self):
+        from PIL import Image, ImageDraw, ImageFont
+        img = Image.new("L", (300, 60), 255)
+        d = ImageDraw.Draw(img)
+        try:
+            font = ImageFont.truetype(
+                "/System/Library/Fonts/Supplemental/Arial Bold.ttf", 24)
+        except OSError:
+            font = ImageFont.load_default()
+        d.text((10, 15), "HELLO", fill=0, font=font)
+        d.line((0, 0, 0, 60), fill=0, width=3)   # gridline bleed
+        out = pc._ocr_cell(img, (0, 0, 300, 60))
+        assert out == "HELLO"
+
+    def test_house_ptr_trades_ocr_skips_without_tesseract(self, monkeypatch, capsys):
+        monkeypatch.setattr(pc, "_tess_available", lambda: False)
+        assert pc.house_ptr_trades_ocr(b"%PDF-fake", "https://pdf/1.pdf") == []
+        assert "tesseract not installed" in capsys.readouterr().out
+
+    def test_house_ptr_trades_ocr_render_failure(self, monkeypatch, capsys):
+        monkeypatch.setattr(pc, "_tess_available", lambda: True)
+        assert pc.house_ptr_trades_ocr(b"not a pdf", "https://pdf/1.pdf") == []
+        assert "ocr render failed" in capsys.readouterr().out
+
+    def test_synthesis_round_trip_over_amount(self):
+        # house_ptr_trades_ocr builds e-filed lines; "Over $50,000,000" must
+        # parse through the standard parser with the anchor stripped.
+        anchor = pc.re.sub(r"^Over\s+", "", "Over $50,000,000")
+        line = f"Microsoft (MSFT) S 07/30/2026 08/19/2026 {anchor}"
+        parsed = pc.house_trades_from_text(line)
+        assert len(parsed) == 1
+        assert parsed[0]["type"] == "Sale"
+        assert parsed[0]["amount"] == "$50,000,000"
+        assert parsed[0]["ticker"] == "MSFT"
+
+    def test_no_text_layer_delegates_to_ocr(self, monkeypatch):
+        def fake_ocr(raw, pdf_url):
+            return [{"source": "ocr", "confidence": "medium", "asset_name": "X"}]
+        monkeypatch.setattr(
+            pc.pdfplumber, "open",
+            lambda *a, **k: FakePdf([FakePdfPage(None)]))
+        monkeypatch.setattr(pc, "house_ptr_trades_ocr", fake_ocr)
+        s = FakeSession(bytes_by_url={"https://pdf/1.pdf": b"%PDF-fake"})
+        trades = pc.house_ptr_trades(s, "https://pdf/1.pdf")
+        assert trades == [{"source": "ocr", "confidence": "medium", "asset_name": "X"}]
+
+
 # ---------------------------------------------------------------- db: migrations
 
 class TestRunMigrations:
