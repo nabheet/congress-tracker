@@ -11,12 +11,15 @@ Coverage targets (no network / DB / PDF):
 """
 
 import json
+import runpy
 import time
 import urllib.error
 import urllib.request
 from datetime import date
+from pathlib import Path
 
 import pytest
+from PIL import Image, ImageDraw
 
 import pull_congress as pc
 from tests.conftest import (
@@ -236,6 +239,24 @@ class TestHousePtrTradesColumnar:
         assert trades[0]["comment"] == "sold some second thought"
         assert trades[1]["owner"] == "Joint"
         assert trades[1]["comment"] is None
+
+
+    def test_columnar_d_comment_plain_continuation_and_anchor(self):
+        # A D: comment followed by a plain continuation line, then the next
+        # row's anchor — exercises the inner D: scan window (plain-text join
+        # and break on a following anchor).
+        text = ("ID Owner Asset Transaction Date\n"
+                "SP Apple Inc S 09/01/2026 09/05/2026\n"
+                "[GS]\n"
+                "D: sold some\n"
+                "due to rebalancing\n"
+                "JT Tesla Inc X 09/02/2026 09/06/2026\n"
+                "[ST]\n"
+                "$15,001 - $50,000\n")
+        trades = pc.house_trades_from_text(text)
+        assert len(trades) == 1
+        assert trades[0]["owner"] == "Joint"
+        assert trades[0]["type"] == "Exchange"
 
 
 # ---------------------------------------------------------------- parser edge cases
@@ -687,6 +708,329 @@ class TestHousePtrTrades:
         assert trades[0]["ticker"] == "AAPL"
 
 
+# ---------------------------------------------------------------- house PTR OCR
+
+def _minimal_ptr_pdf():
+    """Build a 1-page text-only PDF in memory (valid xref) for render tests."""
+    import io
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+        b"/Resources << /Font << /F1 5 0 R >> >> >>",
+        b"<< /Length 44 >>\nstream\nBT /F1 24 Tf 72 720 Td (Hello) Tj ET\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    out = io.BytesIO()
+    out.write(b"%PDF-1.4\n")
+    offsets = []
+    for i, obj in enumerate(objects, 1):
+        offsets.append(out.tell())
+        out.write(f"{i} 0 obj\n".encode())
+        out.write(obj + b"\nendobj\n")
+    xref = out.tell()
+    out.write(f"xref\n0 {len(objects) + 1}\n".encode())
+    out.write(b"0000000000 65535 f \n")
+    for off in offsets:
+        out.write(f"{off:010d} 00000 n \n".encode())
+    out.write(f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+              f"startxref\n{xref}\n%%EOF\n".encode())
+    return out.getvalue()
+
+
+def _synthetic_form(vfracs, hfracs, width=1696, height=2200):
+    """Build a PIL grayscale image of the standard PTR form's gridlines."""
+    from PIL import Image, ImageDraw
+    img = Image.new("L", (width, height), 255)
+    d = ImageDraw.Draw(img)
+    if vfracs:
+        for f in vfracs:
+            x = min(int(f * width), width - 1)
+            d.line([(x, int(0.55 * height)), (x, int(0.80 * height))], fill=0, width=2)
+    if hfracs:
+        lo, hi = int(width * 0.05), int(width * 0.95)
+        for f in hfracs:
+            d.line([(lo, int(f * height)), (hi, int(f * height))], fill=0, width=2)
+    return img
+
+
+def _draw_x(img, box, band):
+    """Draw an X checkbox mark inside box spanning band (y0, y1)."""
+    from PIL import ImageDraw
+    d = ImageDraw.Draw(img)
+    x0, y0, x1, y1 = box[0], band[0], box[1], band[1]
+    d.line([(x0, y0), (x1, y1)], fill=0, width=3)
+    d.line([(x1, y0), (x0, y1)], fill=0, width=3)
+
+
+class TestHousePtrOcr:
+    def test_normalize_ocr_date_variants(self):
+        assert pc._normalize_ocr_date("7/30/26") == "07/30/2026"
+        assert pc._normalize_ocr_date("07/30/2026") == "07/30/2026"
+        assert pc._normalize_ocr_date("8/19/26") == "08/19/2026"
+        assert pc._normalize_ocr_date("1.5.28") == "01/05/2028"
+        assert pc._normalize_ocr_date("junk") is None
+        assert pc._normalize_ocr_date("") is None
+
+    def test_pick_checked_clear_winner(self):
+        idx, ok = pc._pick_checked([0.0, 0.9, 0.1])
+        assert idx == 1 and ok is True
+
+    def test_pick_checked_all_weak(self):
+        idx, ok = pc._pick_checked([0.05, 0.04])
+        assert idx is None and ok is False
+
+    def test_pick_checked_thin_margin(self):
+        # margin (0.4-0.35)/0.4 = 0.125 < 0.15 -> flagged unreliable
+        idx, ok = pc._pick_checked([0.4, 0.35])
+        assert idx == 0 and ok is False
+
+    def test_pick_checked_empty(self):
+        assert pc._pick_checked([]) == (None, False)
+
+    def test_ocr_owner_mapping(self):
+        assert pc._ocr_owner("SP") == "Spouse"
+        assert pc._ocr_owner("DC") == "Dependent Child"
+        assert pc._ocr_owner("JT") == "Joint"
+        assert pc._ocr_owner("") == "Self"
+        assert pc._ocr_owner("john") == "Self"
+        assert pc._ocr_owner("OS") == "Self"   # not a prefix match
+
+    def test_amount_ranges_are_twelve(self):
+        assert len(pc.PTR_AMOUNT_RANGES) == 12
+        assert pc.PTR_AMOUNT_RANGES[0] == "$200 - $1,000"
+        assert pc.PTR_AMOUNT_RANGES[-1] == "Over $1,000,000"
+        assert pc.PTR_AMOUNT_RANGES[-2] == "Over $50,000,000"
+
+    def test_box_score_detects_x_mark(self):
+        from PIL import Image, ImageDraw
+        img = Image.new("L", (60, 60), 255)
+        d = ImageDraw.Draw(img)
+        # empty box frame
+        d.rectangle([10, 10, 50, 50], outline=0, width=2)
+        empty = pc._box_score(img, 10, 10, 50, 50)
+        # X mark inside
+        d.line([10, 10, 50, 50], fill=0, width=3)
+        d.line([50, 10, 10, 50], fill=0, width=3)
+        marked = pc._box_score(img, 10, 10, 50, 50)
+        assert marked > empty
+        assert marked > 0.5
+
+    @pytest.mark.skipif(not pc._tess_available(), reason="tesseract not installed")
+    def test_ocr_cell_strips_rule_line(self):
+        from PIL import Image, ImageDraw, ImageFont
+        img = Image.new("L", (300, 60), 255)
+        d = ImageDraw.Draw(img)
+        try:
+            font = ImageFont.truetype(
+                "/System/Library/Fonts/Supplemental/Arial Bold.ttf", 24)
+        except OSError:
+            font = ImageFont.load_default()
+        d.text((10, 15), "HELLO", fill=0, font=font)
+        d.line((0, 0, 0, 60), fill=0, width=3)   # gridline bleed
+        out = pc._ocr_cell(img, (0, 0, 300, 60))
+        assert out == "HELLO"
+
+    def test_house_ptr_trades_ocr_skips_without_tesseract(self, monkeypatch, capsys):
+        monkeypatch.setattr(pc, "_tess_available", lambda: False)
+        assert pc.house_ptr_trades_ocr(b"%PDF-fake", "https://pdf/1.pdf") == []
+        assert "tesseract not installed" in capsys.readouterr().out
+
+    def test_house_ptr_trades_ocr_render_failure(self, monkeypatch, capsys):
+        monkeypatch.setattr(pc, "_tess_available", lambda: True)
+        assert pc.house_ptr_trades_ocr(b"not a pdf", "https://pdf/1.pdf") == []
+        assert "ocr render failed" in capsys.readouterr().out
+
+    def test_synthesis_round_trip_over_amount(self):
+        # house_ptr_trades_ocr builds e-filed lines; "Over $50,000,000" must
+        # parse through the standard parser with the anchor stripped.
+        anchor = pc.re.sub(r"^Over\s+", "", "Over $50,000,000")
+        line = f"Microsoft (MSFT) S 07/30/2026 08/19/2026 {anchor}"
+        parsed = pc.house_trades_from_text(line)
+        assert len(parsed) == 1
+        assert parsed[0]["type"] == "Sale"
+        assert parsed[0]["amount"] == "$50,000,000"
+        assert parsed[0]["ticker"] == "MSFT"
+
+    def test_no_text_layer_delegates_to_ocr(self, monkeypatch):
+        def fake_ocr(raw, pdf_url):
+            return [{"source": "ocr", "confidence": "medium", "asset_name": "X"}]
+        monkeypatch.setattr(
+            pc.pdfplumber, "open",
+            lambda *a, **k: FakePdf([FakePdfPage(None)]))
+        monkeypatch.setattr(pc, "house_ptr_trades_ocr", fake_ocr)
+        s = FakeSession(bytes_by_url={"https://pdf/1.pdf": b"%PDF-fake"})
+        trades = pc.house_ptr_trades(s, "https://pdf/1.pdf")
+        assert trades == [{"source": "ocr", "confidence": "medium", "asset_name": "X"}]
+
+    def test_render_ptr_pages_minimal_pdf(self):
+        pages = pc._render_ptr_pages(_minimal_ptr_pdf())
+        assert len(pages) == 1
+        assert pages[0].mode == "L"
+        assert pages[0].size == (1224, 1584)  # 612x792 @ scale 2
+
+    def test_detect_gridlines_vertical(self):
+        img = Image.new("L", (200, 200), 255)
+        d = ImageDraw.Draw(img)
+        for x in (50, 100, 199):      # 199 = last column (trailing branch)
+            d.line([(x, 110), (x, 160)], fill=0, width=1)
+        assert pc._detect_gridlines(img, vertical=True) == [50.0, 100.0, 199.0]
+
+    def test_detect_gridlines_horizontal(self):
+        img = Image.new("L", (200, 200), 255)
+        d = ImageDraw.Draw(img)
+        for y in (60, 120):
+            d.line([(10, y), (190, y)], fill=0, width=1)
+        assert pc._detect_gridlines(img, vertical=False) == [60.0, 120.0]
+
+    def test_ptr_layout_standard_form(self):
+        img = _synthetic_form(pc._PTR_COL_FRACS,
+                              [0.614, 0.6305, 0.6568, 0.6827, 0.7082, 0.7341, 0.76])
+        cols, bands, ok = pc._ptr_layout(img)
+        assert len(cols) == 20
+        assert len(bands) == 6
+        assert ok is True
+        assert bands[0][0] == 1350 and bands[-1][1] == 1672
+
+    def test_ptr_layout_blank_form_falls_back(self):
+        img = Image.new("L", (1696, 2200), 255)
+        cols, bands, ok = pc._ptr_layout(img)
+        assert len(cols) == 20
+        assert len(bands) == 4          # 5 row-fracs -> 4 bands
+        assert ok is False
+
+    def test_ptr_layout_too_many_gridlines_flags(self):
+        # 755: vline count far from the expected 21 -> structural_ok False
+        img = _synthetic_form([i / 25 for i in range(26)],  # 26 vlines
+                              [0.614, 0.6305, 0.6568, 0.6827, 0.7082, 0.7341, 0.76])
+        _, _, ok = pc._ptr_layout(img)
+        assert ok is False
+
+    def test_ptr_layout_gridline_position_error_flags(self, monkeypatch):
+        # 756-765: right count but badly placed vlines -> mean error > 3% -> False
+        img = Image.new("L", (1696, 2200), 255)
+        w = img.width
+        expected = [pc._PTR_COL_FRACS[i] * w
+                    for i in range(1, len(pc._PTR_COL_FRACS) - 1)]
+        # 21 vlines crowded on the left third: most expected positions have no
+        # nearby line, so mean position error blows past the 3% threshold.
+        vlines = [100 + i * (500 - 100) / 20 for i in range(21)]
+        assert sum(min(abs(v - ex) for v in vlines) for ex in expected) / len(expected) / w > 0.03
+        monkeypatch.setattr(pc, "_detect_gridlines",
+                            lambda img, vertical=True: vlines if vertical else [])
+        _, _, ok = pc._ptr_layout(img)
+        assert ok is False
+
+    def test_ocr_cell_tiny_crop_returns_empty(self):
+        img = Image.new("L", (20, 20), 255)
+        assert pc._ocr_cell(img, (0, 0, 3, 10)) == ""   # too narrow
+        assert pc._ocr_cell(img, (0, 0, 10, 3)) == ""   # too short
+
+    def test_box_score_degenerate_box(self):
+        img = Image.new("L", (30, 30), 255)
+        # inset 10 makes the interior empty -> 0.0 without touching pixels
+        assert pc._box_score(img, 0, 0, 15, 15) == 0.0
+
+    def test_house_ptr_trades_ocr_full_loop(self, monkeypatch, capsys):
+        img = _synthetic_form(pc._PTR_COL_FRACS,
+                              [0.614, 0.6305, 0.6568, 0.6827, 0.7082, 0.7341, 0.76])
+        cols, bands, ok = pc._ptr_layout(img)
+        assert ok is True
+        # band0: valid trade (S + amount idx1 + full text) -> high
+        _draw_x(img, cols[4], bands[0])
+        _draw_x(img, cols[9], bands[0])
+        # band1: empty row -> skipped (no marks, no text)
+        # band2: S only, no amount mark -> amt None -> continue
+        _draw_x(img, cols[4], bands[2])
+        # band3: amount only, no type mark -> code None -> continue
+        _draw_x(img, cols[9], bands[3])
+        # band4: valid marks, no ticker text -> medium
+        _draw_x(img, cols[4], bands[4])
+        _draw_x(img, cols[9], bands[4])
+        # band5: junk txn date -> parse fail -> continue
+        _draw_x(img, cols[4], bands[5])
+        _draw_x(img, cols[9], bands[5])
+
+        def fake_ocr(img, box, psm=7, scale=2.0):
+            x0, y0, x1, y1 = box
+            txt = {
+                (bands[0][0], cols[2][0]): "Microsoft",
+                (bands[0][0], cols[1][0]): "MSFT",
+                (bands[0][0], cols[0][0]): "SP",
+                (bands[0][0], cols[6][0]): "07/30/2026",
+                (bands[0][0], cols[7][0]): "08/19/2026",
+                (bands[2][0], cols[2][0]): "Apple",
+                (bands[2][0], cols[1][0]): "AAPL",
+                (bands[2][0], cols[0][0]): "SP",
+                (bands[2][0], cols[6][0]): "07/30/2026",
+                (bands[2][0], cols[7][0]): "08/19/2026",
+                (bands[3][0], cols[2][0]): "Tesla",
+                (bands[3][0], cols[1][0]): "TSLA",
+                (bands[3][0], cols[0][0]): "SP",
+                (bands[3][0], cols[6][0]): "07/30/2026",
+                (bands[3][0], cols[7][0]): "08/19/2026",
+                (bands[4][0], cols[2][0]): "Amazon",
+                (bands[4][0], cols[0][0]): "SP",
+                (bands[4][0], cols[6][0]): "07/30/2026",
+                (bands[4][0], cols[7][0]): "08/19/2026",
+                (bands[5][0], cols[2][0]): "Netflix",
+                (bands[5][0], cols[1][0]): "nflx",   # lowercase: ticker regex rejects -> None
+                (bands[5][0], cols[0][0]): "SP",
+                (bands[5][0], cols[6][0]): "junk",
+                (bands[5][0], cols[7][0]): "08/19/2026",
+            }
+            return txt.get((y0, x0), "")
+
+        monkeypatch.setattr(pc, "_render_ptr_pages", lambda raw: [img])
+        monkeypatch.setattr(pc, "_tess_available", lambda: True)
+        monkeypatch.setattr(pc, "_ocr_cell", fake_ocr)
+        trades = pc.house_ptr_trades_ocr(b"%PDF", "https://pdf/1.pdf")
+        assert len(trades) == 2
+        t0, t1 = trades
+        assert t0["confidence"] == "high" and t0["ticker"] == "MSFT"
+        assert t0["amount"] == "$1,001 - $15,000" and t0["type"] == "Sale"
+        assert t0["owner"] == "Spouse" and t0["txn_date"] == "07/30/2026"
+        assert t1["confidence"] == "medium" and t1["ticker"] is None
+        assert t1["asset_name"] == "Amazon"
+        assert capsys.readouterr().out == ""  # no low-confidence prints
+
+    def test_house_ptr_trades_ocr_low_confidence_structural(self, monkeypatch, capsys):
+        img = _synthetic_form(pc._PTR_COL_FRACS,
+                              [0.614, 0.6305, 0.6568, 0.6827, 0.7082, 0.7341, 0.76])
+        cols, bands, _ = pc._ptr_layout(img)
+        _draw_x(img, cols[4], bands[0])
+        _draw_x(img, cols[9], bands[0])
+
+        def fake_ocr(img, box, psm=7, scale=2.0):
+            x0, y0, x1, y1 = box
+            txt = {
+                (bands[0][0], cols[2][0]): "Microsoft",
+                (bands[0][0], cols[1][0]): "MSFT",
+                (bands[0][0], cols[0][0]): "SP",
+                (bands[0][0], cols[6][0]): "07/30/2026",
+                (bands[0][0], cols[7][0]): "08/19/2026",
+            }
+            return txt.get((y0, x0), "")
+
+        monkeypatch.setattr(pc, "_render_ptr_pages", lambda raw: [img])
+        monkeypatch.setattr(pc, "_tess_available", lambda: True)
+        monkeypatch.setattr(pc, "_ocr_cell", fake_ocr)
+        monkeypatch.setattr(pc, "_ptr_layout", lambda img: (cols, bands, False))
+        trades = pc.house_ptr_trades_ocr(b"%PDF", "https://pdf/1.pdf")
+        assert len(trades) == 1
+        assert trades[0]["confidence"] == "low"
+        assert "LOW-CONFIDENCE OCR row" in capsys.readouterr().out
+
+    def test_house_ptr_trades_ocr_short_cols_guard(self, monkeypatch):
+        # 898-899: malformed layout (fewer than 12 amount boxes) flags low.
+        img = Image.new("L", (1696, 2200), 255)
+        monkeypatch.setattr(pc, "_render_ptr_pages", lambda raw: [img])
+        monkeypatch.setattr(pc, "_tess_available", lambda: True)
+        monkeypatch.setattr(pc, "_ocr_cell", lambda img, box, psm=7, scale=2.0: "")
+        monkeypatch.setattr(pc, "_ptr_layout", lambda img: ([(0, 10)] * 9, [(0, 10)], True))
+        assert pc.house_ptr_trades_ocr(b"%PDF", "https://pdf/1.pdf") == []
+
+
 # ---------------------------------------------------------------- db: migrations
 
 class TestRunMigrations:
@@ -728,8 +1072,26 @@ class TestRunMigrations:
         d = tmp_path / "migrations"
         d.mkdir()
         monkeypatch.setattr(pc, "MIGRATIONS_DIR", str(d))
-        conn = FakeConn(cursors=[FakeCursor(), FakeCursor(fetchall_result=[])])
+        conn = FakeConn()
         assert pc.run_migrations(conn) == 0
+
+    def test_migration_failure_raises(self, monkeypatch, tmp_path):
+        d = tmp_path / "migrations"
+        d.mkdir()
+        (d / "01_first.sql").write_text("CREATE TABLE a (id int);")
+        monkeypatch.setattr(pc, "MIGRATIONS_DIR", str(d))
+
+        class BoomCursor(FakeCursor):
+            def execute(self, sql, params=None):
+                if sql == "CREATE TABLE a (id int);":
+                    raise RuntimeError("syntax error")
+                return super().execute(sql, params)
+
+        cur_create = FakeCursor()
+        cur_select = FakeCursor(fetchall_result=[])
+        conn = FakeConn(cursors=[cur_create, cur_select, BoomCursor()])
+        with pytest.raises(RuntimeError, match=r"migration 01_first.sql failed"):
+            pc.run_migrations(conn)
 
 
 # ---------------------------------------------------------------- run_senate
@@ -980,6 +1342,41 @@ class TestRunHouse:
                    if c[0] == "DELETE FROM trades WHERE filing_id = %s"]
         assert deletes == [("DELETE FROM trades WHERE filing_id = %s", ("house:111",))]
 
+    def test_skips_low_confidence_ocr(self, monkeypatch, capsys):
+        year = 2026
+        xml = """<?xml version="1.0"?>
+<Members>
+  <Member><Last>Smith</Last><First>John</First><FilingType>P</FilingType>
+    <FilingDate>09/01/2026</FilingDate><DocID>111</DocID></Member>
+</Members>
+"""
+        zip_url = pc.HOUSE_PUBLIC + f"/financial-pdfs/{year}FD.zip"
+        fake = FakeSession(bytes_by_url={zip_url: make_fd_zip(year, xml)})
+        monkeypatch.setattr(pc, "Session", lambda: fake)
+        monkeypatch.setattr(pc.time, "sleep", lambda s: None)
+
+        low = {"owner": "Spouse", "ticker": "MSFT", "asset_name": "Microsoft",
+               "type": "Sale", "amount": "$1,001 - $15,000", "txn_date": "07/30/2026",
+               "source": "ocr", "confidence": "low"}
+        high = {"owner": "Spouse", "ticker": "AAPL", "asset_name": "Apple",
+                "type": "Purchase", "amount": "$15,001 - $50,000", "txn_date": "08/01/2026",
+                "source": "ocr", "confidence": "high"}
+        monkeypatch.setattr(pc, "house_ptr_trades", lambda s, url: [low, high])
+
+        cur_done = FakeCursor(fetchall_result=[])
+        cur_upsert = FakeCursor()
+        cur_trades = FakeCursor()
+        conn = FakeConn(cursors=[cur_done, cur_upsert, cur_trades])
+        nf, nt = pc.run_house(conn, years=[year])
+        assert nf == 1
+        assert nt == 1   # only the high-confidence row is ingested
+        out = capsys.readouterr().out
+        assert "SKIP low-confidence OCR house:111" in out
+        inserts = [c for c in cur_trades.calls
+                   if c[0].startswith("INSERT INTO trades")]
+        assert len(inserts) == 1
+        assert inserts[0][1][1] == "AAPL"   # filing_id, ticker slot
+
 
 # ---------------------------------------------------------------- db: db_conn
 
@@ -1073,3 +1470,15 @@ class TestMain:
             pc.main()
         assert exc.value.code == 1
         assert "ERROR" in capsys.readouterr().out
+
+    def test_main_guard(self, monkeypatch):
+        # __main__ block must call main() and exit nonzero when db_conn fails
+        # (missing PG_PASS_FILE), without raising outside main's error handling.
+        monkeypatch.setenv("POSTGRES_PASSWORD_FILE", "/nonexistent/pgpass")
+        monkeypatch.delenv("START_DATE", raising=False)
+        monkeypatch.delenv("END_DATE", raising=False)
+        monkeypatch.delenv("REFRESH_HOUSE", raising=False)
+        script = str(Path(__file__).resolve().parent.parent / "pull_congress.py")
+        with pytest.raises(SystemExit) as exc:
+            runpy.run_path(script, run_name="__main__")
+        assert exc.value.code == 1
