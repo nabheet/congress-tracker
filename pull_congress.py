@@ -676,6 +676,14 @@ _PTR_COL_FRACS = [
 ]
 # Expected number of vertical gridlines on the form (incl. left/right edges).
 _PTR_EXPECTED_GRIDLINES = len(_PTR_COL_FRACS)
+
+# Instruction rows ("ASSET NAME: PROVIDE FULL NAME...") can bleed into the
+# OCR of a real row; any asset cell containing one of these phrases is a
+# form header/footer, not a trade.
+_PTR_OCR_GARBAGE = (
+    "ASSET NAME", "PROVIDE FULL", "ANSWERED", "THE ATTACHED",
+    "TICKER SYMBE", "FULL NAME", "YOU ANSWERED",
+)
 # Data-row band starts as fractions of the form's height (native 2200px).
 _PTR_ROW_FRACS = [0.6305, 0.6568, 0.6827, 0.7082, 0.7341]
 _PTR_HEADER_BOTTOM_FRAC = 0.614  # below this lie the data rows
@@ -696,6 +704,21 @@ def _render_ptr_pages(raw, scale=2):
             img = page.render(scale=int(scale)).to_pil()
             pages.append(img.convert("L"))
     return pages
+
+
+def _render_ptr_pages_hires(raw):
+    """Yield (SC6, SC12) grayscale renders per page, one page at a time.
+
+    SC12 pages are ~130MB, so they are rendered lazily per page instead of
+    materializing the whole document. Only date-cell OCR uses these renders.
+    """
+    import pypdfium2 as pdfium
+    from PIL import Image
+
+    with pdfium.PdfDocument(raw) as doc:
+        for page in doc:
+            yield (page.render(scale=6).to_pil().convert("L"),
+                   page.render(scale=12).to_pil().convert("L"))
 
 
 def _detect_gridlines(img, vertical=True, min_frac=0.55):
@@ -808,15 +831,105 @@ def _ocr_cell(img, box, psm=7, scale=2.0):
     return text
 
 
-def _normalize_ocr_date(s):
-    """Normalize an OCR'd date ('7/30/26', '07/30/2026') to MM/DD/YYYY."""
-    m = re.search(r"(\d{1,2})[/.](\d{1,2})[/.](\d{2,4})", s)
+def _ocr_date_cell(img6, img12, box, y0, y1):
+    """OCR a date cell: SC12 bottom-half recipe first, SC6 text-bounds fallback.
+
+    box/y0/y1 are SC2 layout coordinates; img6/img12 are SC6/SC12 renders
+    (the crop recipes are tuned in SC6 units, so coordinates are scaled x3).
+    The SC12 pass reads the bottom half of the band (the digits sit on the
+    bottom rule) with tight text bounds, binarization, 3x upscale and a digit
+    whitelist; it handles faint scans but misreads a '1' that touches the box
+    border on clean pages. An SC12 result is accepted only if it normalizes to
+    a plausible date, otherwise the SC6 recipe (which handles clean pages) is
+    used. Returns the raw OCR string (year may be truncated; caller pads it).
+    """
+    from PIL import Image
+    import subprocess
+
+    bx0, bx1 = box
+    y0_6, y1_6 = y0 * 3, y1 * 3
+    bx0_6, bx1_6 = bx0 * 3, bx1 * 3
+
+    def _tess(crop, scale=3):
+        gg = crop.resize((crop.size[0] * scale, crop.size[1] * scale),
+                         Image.Resampling.NEAREST)
+        buf = io.BytesIO()
+        gg.save(buf, format="PNG")
+        proc = subprocess.run(
+            ["tesseract", "stdin", "stdout", "--psm", "7",
+             "-c", "tessedit_char_whitelist=0123456789/"],
+            input=buf.getvalue(), capture_output=True, timeout=20)
+        return proc.stdout.decode("utf-8", "replace").strip()
+
+    # SC12 pass: bottom half of the band, tight text bounds, binarize, 3x.
+    k = 2  # SC12 / SC6
+    cy0 = int((y1_6 - int((y1_6 - y0_6) * 0.5)) * k)
+    cy1 = int((y1_6 - 3) * k)
+    cx0 = int((bx0_6 + 8) * k)
+    cx1 = int((bx1_6 - 8) * k)
+    # Clamp to image bounds: Pillow pads out-of-bounds crop regions with
+    # black, which would fabricate phantom dark pixels and send a blank cell
+    # to tesseract (crashes on hosts without tesseract, e.g. CI).
+    sub = img12.crop((max(0, cx0), max(0, cy0),
+                      min(img12.width, cx1), min(img12.height, cy1)))
+    pxs = sub.load()
+    ys = [y for y in range(sub.height) for x in range(sub.width) if pxs[x, y] < 128]
+    if ys:
+        t0, t1 = max(0, min(ys) - 2), min(sub.height, max(ys) + 2)
+        xs = [x for y in range(t0, t1) for x in range(sub.width) if pxs[x, y] < 128]
+        if xs:
+            x0, x1 = max(0, min(xs) - 2), min(sub.width, max(xs) + 2)
+            crop = sub.crop((x0, t0, x1, t1))
+            b = crop.point(lambda p: 0 if p < 170 else 255)
+            r = _tess(b, scale=3)
+            if r and _normalize_ocr_date(r):
+                return r
+
+    # SC6 fallback: text bounds inside the band, binarize, 6x.
+    px = img6.load()
+    ys = [y for y in range(y0_6 + 5, y1_6 - 5)
+          for x in range(bx0_6 + 8, bx1_6) if px[x, y] < 128]
+    if not ys:
+        return ""
+    t0, t1 = min(ys) - 4, max(ys) + 4
+    xs = [x for y in range(t0, t1)
+          for x in range(bx0_6 + 8, bx1_6) if px[x, y] < 128]
+    if not xs:
+        return ""
+    x0, x1 = min(xs) - 4, max(xs) + 6
+    crop = img6.crop((x0, t0, x1, t1))
+    g = crop.convert("L").point(lambda p: 0 if p < 170 else 255)
+    return _tess(g, scale=6)
+
+
+def _normalize_ocr_date(s, filing_year=2025):
+    """Normalize an OCR'd date ('7/30/26', '07/30/2026') to MM/DD/YYYY.
+
+    Returns None when the parts are not a plausible date (month > 12 or
+    day > 31), which filters OCR misreads like '40/01/25' and '10/32/25'
+    that a raw regex would otherwise accept. A truncated 1-digit year is
+    padded from the filing year.
+    """
+    m = re.search(r"(\d{1,2})[/.](\d{1,2})[/.](\d{1,4})", s)
     if not m:
         return None
-    mo, d, y = m.groups()
-    if len(y) == 2:
+    mo, d, y = int(m.group(1)), int(m.group(2)), m.group(3)
+    if not (1 <= mo <= 12 and 1 <= d <= 31):
+        return None
+    if len(y) == 1:
+        # truncated final digit: pad from filing year
+        yy = str(filing_year)
+        if y == yy[-1]:
+            y = yy
+        elif y == "2":
+            y = str(filing_year)
+        else:
+            return None
+    elif len(y) == 2:
         y = "20" + y
-    return f"{int(mo):02d}/{int(d):02d}/{y}"
+    elif len(y) == 3:
+        y = "20" + y
+    return f"{mo:02d}/{d:02d}/{y}"
 
 
 def _box_score(img, x0, y0, x1, y1, inset=10):
@@ -886,12 +999,14 @@ def house_ptr_trades_ocr(raw, pdf_url):
         return []
     try:
         pages = _render_ptr_pages(raw)
+        hires = _render_ptr_pages_hires(raw)
     except Exception as e:
         print(f"house: ocr render failed {pdf_url}: {e!r}", flush=True)
         return []
 
     trades = []
     for page_idx, img in enumerate(pages):
+        img6, img12 = next(hires)
         cols, row_bands, structural_ok = _ptr_layout(img)
         type_boxes = [cols[3], cols[4], cols[5]]          # P, S, X
         amount_boxes = cols[8:]                            # 11 narrow + wide
@@ -900,10 +1015,12 @@ def house_ptr_trades_ocr(raw, pdf_url):
 
         for (y0, y1) in row_bands:
             asset = _ocr_cell(img, (cols[2][0], y0, cols[2][1], y1)).strip(" ,-:")
+            if any(g in asset.upper() for g in _PTR_OCR_GARBAGE):
+                continue  # form header/footer instruction row, not a trade
             ticker_text = _ocr_cell(img, (cols[1][0], y0, cols[1][1], y1))
             owner_text = _ocr_cell(img, (cols[0][0], y0, cols[0][1], y1))
-            txn_text = _ocr_cell(img, (cols[6][0], y0, cols[6][1], y1))
-            notif_text = _ocr_cell(img, (cols[7][0], y0, cols[7][1], y1))
+            txn_text = _ocr_date_cell(img6, img12, cols[6], y0, y1)
+            notif_text = _ocr_date_cell(img6, img12, cols[7], y0, y1)
 
             type_scores = [_box_score(img, bx[0], y0, bx[1], y1) for bx in type_boxes]
             type_idx, type_ok = _pick_checked(type_scores)

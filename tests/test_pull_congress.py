@@ -772,6 +772,23 @@ class TestHousePtrOcr:
         assert pc._normalize_ocr_date("junk") is None
         assert pc._normalize_ocr_date("") is None
 
+    def test_normalize_ocr_date_rejects_implausible(self):
+        # OCR misreads of the month/day digits: month > 12 or day > 31.
+        assert pc._normalize_ocr_date("40/01/25") is None
+        assert pc._normalize_ocr_date("41/04/25") is None
+        assert pc._normalize_ocr_date("13/01/25") is None
+        assert pc._normalize_ocr_date("10/32/25") is None
+        assert pc._normalize_ocr_date("10/67/25") is None
+        # plausible dates still normalize
+        assert pc._normalize_ocr_date("11/04/25") == "11/04/2025"
+        assert pc._normalize_ocr_date("10/31/25") == "10/31/2025"
+
+    def test_normalize_ocr_date_truncated_year(self):
+        # a 1-digit year is padded from the filing year when it matches
+        assert pc._normalize_ocr_date("11/04/5") == "11/04/2025"   # last digit of 2025
+        assert pc._normalize_ocr_date("11/04/2") == "11/04/2025"   # leading '2' pads fully
+        assert pc._normalize_ocr_date("11/04/3") is None           # no match for '3'
+
     def test_pick_checked_clear_winner(self):
         idx, ok = pc._pick_checked([0.0, 0.9, 0.1])
         assert idx == 1 and ok is True
@@ -869,6 +886,15 @@ class TestHousePtrOcr:
         assert pages[0].mode == "L"
         assert pages[0].size == (1224, 1584)  # 612x792 @ scale 2
 
+    def test_render_ptr_pages_hires_minimal_pdf(self):
+        # Lazy generator yields (SC6, SC12) per page; SC12 = 2x SC6.
+        pages = list(pc._render_ptr_pages_hires(_minimal_ptr_pdf()))
+        assert len(pages) == 1
+        img6, img12 = pages[0]
+        assert img6.mode == "L" and img12.mode == "L"
+        assert img6.size == (3672, 4752)    # 612x792 @ scale 6
+        assert img12.size == (7344, 9504)   # 612x792 @ scale 12
+
     def test_detect_gridlines_vertical(self):
         img = Image.new("L", (200, 200), 255)
         d = ImageDraw.Draw(img)
@@ -926,6 +952,21 @@ class TestHousePtrOcr:
         assert pc._ocr_cell(img, (0, 0, 3, 10)) == ""   # too narrow
         assert pc._ocr_cell(img, (0, 0, 10, 3)) == ""   # too short
 
+    def test_ocr_date_cell_blank_returns_empty(self):
+        # No dark pixels anywhere: SC12 pass and SC6 fallback both bail out.
+        img = Image.new("L", (50, 50), 255)
+        assert pc._ocr_date_cell(img, img, (0, 10), 0, 10) == ""
+
+    def test_ocr_date_cell_dark_but_blank_band_returns_empty(self):
+        # Dark pixels exist but outside the band (y > y1): both passes
+        # restrict the scan to the band interior, so nothing is OCR'd.
+        # Images are sized for SC6/SC12 coords (box/y0/y1 scale x3).
+        img6 = Image.new("L", (300, 300), 255)
+        for x in range(10, 200):
+            img6.putpixel((x, 280), 0)      # below the band (y1_6 = 90)
+        img12 = Image.new("L", (600, 600), 255)
+        assert pc._ocr_date_cell(img6, img12, (10, 90), 10, 30) == ""
+
     def test_box_score_degenerate_box(self):
         img = Image.new("L", (30, 30), 255)
         # inset 10 makes the interior empty -> 0.0 without touching pixels
@@ -951,39 +992,45 @@ class TestHousePtrOcr:
         _draw_x(img, cols[4], bands[5])
         _draw_x(img, cols[9], bands[5])
 
+        txt = {
+            (bands[0][0], cols[2][0]): "Microsoft",
+            (bands[0][0], cols[1][0]): "MSFT",
+            (bands[0][0], cols[0][0]): "SP",
+            (bands[0][0], cols[6][0]): "07/30/2026",
+            (bands[0][0], cols[7][0]): "08/19/2026",
+            (bands[2][0], cols[2][0]): "Apple",
+            (bands[2][0], cols[1][0]): "AAPL",
+            (bands[2][0], cols[0][0]): "SP",
+            (bands[2][0], cols[6][0]): "07/30/2026",
+            (bands[2][0], cols[7][0]): "08/19/2026",
+            (bands[3][0], cols[2][0]): "Tesla",
+            (bands[3][0], cols[1][0]): "TSLA",
+            (bands[3][0], cols[0][0]): "SP",
+            (bands[3][0], cols[6][0]): "07/30/2026",
+            (bands[3][0], cols[7][0]): "08/19/2026",
+            (bands[4][0], cols[2][0]): "Amazon",
+            (bands[4][0], cols[0][0]): "SP",
+            (bands[4][0], cols[6][0]): "07/30/2026",
+            (bands[4][0], cols[7][0]): "08/19/2026",
+            (bands[5][0], cols[2][0]): "Netflix",
+            (bands[5][0], cols[1][0]): "nflx",   # lowercase: ticker regex rejects -> None
+            (bands[5][0], cols[0][0]): "SP",
+            (bands[5][0], cols[6][0]): "junk",
+            (bands[5][0], cols[7][0]): "08/19/2026",
+        }
+
         def fake_ocr(img, box, psm=7, scale=2.0):
             x0, y0, x1, y1 = box
-            txt = {
-                (bands[0][0], cols[2][0]): "Microsoft",
-                (bands[0][0], cols[1][0]): "MSFT",
-                (bands[0][0], cols[0][0]): "SP",
-                (bands[0][0], cols[6][0]): "07/30/2026",
-                (bands[0][0], cols[7][0]): "08/19/2026",
-                (bands[2][0], cols[2][0]): "Apple",
-                (bands[2][0], cols[1][0]): "AAPL",
-                (bands[2][0], cols[0][0]): "SP",
-                (bands[2][0], cols[6][0]): "07/30/2026",
-                (bands[2][0], cols[7][0]): "08/19/2026",
-                (bands[3][0], cols[2][0]): "Tesla",
-                (bands[3][0], cols[1][0]): "TSLA",
-                (bands[3][0], cols[0][0]): "SP",
-                (bands[3][0], cols[6][0]): "07/30/2026",
-                (bands[3][0], cols[7][0]): "08/19/2026",
-                (bands[4][0], cols[2][0]): "Amazon",
-                (bands[4][0], cols[0][0]): "SP",
-                (bands[4][0], cols[6][0]): "07/30/2026",
-                (bands[4][0], cols[7][0]): "08/19/2026",
-                (bands[5][0], cols[2][0]): "Netflix",
-                (bands[5][0], cols[1][0]): "nflx",   # lowercase: ticker regex rejects -> None
-                (bands[5][0], cols[0][0]): "SP",
-                (bands[5][0], cols[6][0]): "junk",
-                (bands[5][0], cols[7][0]): "08/19/2026",
-            }
             return txt.get((y0, x0), "")
 
+        def fake_date(img6, img12, box, y0, y1):
+            return txt.get((y0, box[0]), "")
+
         monkeypatch.setattr(pc, "_render_ptr_pages", lambda raw: [img])
+        monkeypatch.setattr(pc, "_render_ptr_pages_hires", lambda raw: iter([(img, img)]))
         monkeypatch.setattr(pc, "_tess_available", lambda: True)
         monkeypatch.setattr(pc, "_ocr_cell", fake_ocr)
+        monkeypatch.setattr(pc, "_ocr_date_cell", fake_date)
         trades = pc.house_ptr_trades_ocr(b"%PDF", "https://pdf/1.pdf")
         assert len(trades) == 2
         t0, t1 = trades
@@ -1001,20 +1048,26 @@ class TestHousePtrOcr:
         _draw_x(img, cols[4], bands[0])
         _draw_x(img, cols[9], bands[0])
 
+        txt = {
+            (bands[0][0], cols[2][0]): "Microsoft",
+            (bands[0][0], cols[1][0]): "MSFT",
+            (bands[0][0], cols[0][0]): "SP",
+            (bands[0][0], cols[6][0]): "07/30/2026",
+            (bands[0][0], cols[7][0]): "08/19/2026",
+        }
+
         def fake_ocr(img, box, psm=7, scale=2.0):
             x0, y0, x1, y1 = box
-            txt = {
-                (bands[0][0], cols[2][0]): "Microsoft",
-                (bands[0][0], cols[1][0]): "MSFT",
-                (bands[0][0], cols[0][0]): "SP",
-                (bands[0][0], cols[6][0]): "07/30/2026",
-                (bands[0][0], cols[7][0]): "08/19/2026",
-            }
             return txt.get((y0, x0), "")
 
+        def fake_date(img6, img12, box, y0, y1):
+            return txt.get((y0, box[0]), "")
+
         monkeypatch.setattr(pc, "_render_ptr_pages", lambda raw: [img])
+        monkeypatch.setattr(pc, "_render_ptr_pages_hires", lambda raw: iter([(img, img)]))
         monkeypatch.setattr(pc, "_tess_available", lambda: True)
         monkeypatch.setattr(pc, "_ocr_cell", fake_ocr)
+        monkeypatch.setattr(pc, "_ocr_date_cell", fake_date)
         monkeypatch.setattr(pc, "_ptr_layout", lambda img: (cols, bands, False))
         trades = pc.house_ptr_trades_ocr(b"%PDF", "https://pdf/1.pdf")
         assert len(trades) == 1
@@ -1025,9 +1078,33 @@ class TestHousePtrOcr:
         # 898-899: malformed layout (fewer than 12 amount boxes) flags low.
         img = Image.new("L", (1696, 2200), 255)
         monkeypatch.setattr(pc, "_render_ptr_pages", lambda raw: [img])
+        monkeypatch.setattr(pc, "_render_ptr_pages_hires", lambda raw: iter([(img, img)]))
         monkeypatch.setattr(pc, "_tess_available", lambda: True)
         monkeypatch.setattr(pc, "_ocr_cell", lambda img, box, psm=7, scale=2.0: "")
         monkeypatch.setattr(pc, "_ptr_layout", lambda img: ([(0, 10)] * 9, [(0, 10)], True))
+        assert pc.house_ptr_trades_ocr(b"%PDF", "https://pdf/1.pdf") == []
+
+    def test_house_ptr_trades_ocr_garbage_row_skipped(self, monkeypatch):
+        # A fully-marked row whose asset text is an instruction line
+        # ("ASSET NAME" header garbage) must be dropped, not parsed as a trade.
+        img = _synthetic_form(pc._PTR_COL_FRACS,
+                              [0.614, 0.6305, 0.6568, 0.6827, 0.7082, 0.7341, 0.76])
+        cols, bands, ok = pc._ptr_layout(img)
+        assert ok is True
+        _draw_x(img, cols[4], bands[0])
+        _draw_x(img, cols[9], bands[0])
+
+        def fake_ocr(img, box, psm=7, scale=2.0):
+            x0, y0, x1, y1 = box
+            if (y0, x0) == (bands[0][0], cols[2][0]):
+                return "ASSET NAME"
+            return ""
+
+        monkeypatch.setattr(pc, "_render_ptr_pages", lambda raw: [img])
+        monkeypatch.setattr(pc, "_render_ptr_pages_hires", lambda raw: iter([(img, img)]))
+        monkeypatch.setattr(pc, "_tess_available", lambda: True)
+        monkeypatch.setattr(pc, "_ocr_cell", fake_ocr)
+        monkeypatch.setattr(pc, "_ocr_date_cell", lambda img6, img12, box, y0, y1: "")
         assert pc.house_ptr_trades_ocr(b"%PDF", "https://pdf/1.pdf") == []
 
 
