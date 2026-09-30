@@ -867,7 +867,11 @@ def _ocr_date_cell(img6, img12, box, y0, y1):
     cy1 = int((y1_6 - 3) * k)
     cx0 = int((bx0_6 + 8) * k)
     cx1 = int((bx1_6 - 8) * k)
-    sub = img12.crop((cx0, cy0, cx1, cy1))
+    # Clamp to image bounds: Pillow pads out-of-bounds crop regions with
+    # black, which would fabricate phantom dark pixels and send a blank cell
+    # to tesseract (crashes on hosts without tesseract, e.g. CI).
+    sub = img12.crop((max(0, cx0), max(0, cy0),
+                      min(img12.width, cx1), min(img12.height, cy1)))
     pxs = sub.load()
     ys = [y for y in range(sub.height) for x in range(sub.width) if pxs[x, y] < 128]
     if ys:
