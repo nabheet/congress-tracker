@@ -12,12 +12,12 @@ uv sync && uv run python pull_congress.py
 
 ## Congress API data sources
 
-Tracks congressional stock trades from two public disclosure APIs:
+Tracks congressional stock trades from two public disclosure sources:
 
 - **Senate eFD** — periodic transaction reports (PTRs) with ticker-level
   trade data via the efdsearch.senate.gov JSON API.
 - **House Clerk** — financial disclosure filings from the Clerk of the
-  House (bulk XML index + per-filing PTR PDFs).
+  House (bulk ZIP/XML index + per-filing PTR PDFs, OCR-parsed).
 
 Both are pulled daily, idempotently. See [What it does](#what-it-does) for
 full details.
@@ -34,10 +34,10 @@ full details.
   (`public_disc/financial-pdfs/YYYYFD.zip` → `YYYYFD.xml`) provides one row
   per filing — member, filing type, filing date, PDF URL (PTRs live under
   `ptr-pdfs/`). Trade-level data exists only inside the individual PTR PDFs,
-  so each new PTR is downloaded and parsed from its PDF text layer (no OCR:
-  scanned image-only PDFs are logged and skipped). Two text layouts are
-  handled: the common amount-on-anchor-line form, plus a columnar variant
-  where the amount range rides on the following line.
+  so each new PTR is downloaded and parsed from its PDF text layer, falling
+  back to OCR (tesseract, with confidence tiers) for scanned image-only PDFs.
+  Two text layouts are handled: the common amount-on-anchor-line form, plus a
+  columnar variant where the amount range rides on the following line.
 - Runs daily via cron (supercronic) in a Docker container; idempotent —
   re-runs skip filings that already have parsed trades.
 
