@@ -4,6 +4,24 @@ Daily congressional stock-trade tracker. Pulls financial disclosure filings
 (Senate eFD + House Clerk) into a Postgres database, with one row per filing
 and one row per disclosed trade.
 
+For journalists, researchers, and traders watching congressional stock trades.
+
+```sh
+uv sync && uv run python pull_congress.py
+```
+
+## Congress API data sources
+
+Tracks congressional stock trades from two public disclosure APIs:
+
+- **Senate eFD** — periodic transaction reports (PTRs) with ticker-level
+  trade data via the efdsearch.senate.gov JSON API.
+- **House Clerk** — financial disclosure filings from the Clerk of the
+  House (bulk XML index + per-filing PTR PDFs).
+
+Both are pulled daily, idempotently. See [What it does](#what-it-does) for
+full details.
+
 ## What it does
 
 - **Senate**: eFD (electronic Financial Disclosure) — periodic transaction
