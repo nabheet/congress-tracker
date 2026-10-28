@@ -65,6 +65,11 @@ PG_DB = os.environ.get("PG_DB", "congress")
 PG_USER = os.environ.get("PG_USER", "postgres")
 PG_PASS_FILE = os.environ.get("POSTGRES_PASSWORD_FILE", "/run/secrets/postgres_password")
 MIGRATIONS_DIR = os.environ.get("MIGRATIONS_DIR", "migrations")
+# Exit nonzero when a source's newest filing is older than this. Filings lag
+# publication by days, and both chambers go quiet in recess, so the window is
+# generous: the point is to catch a source that stopped working, not to nag
+# about a slow week.
+STALE_DAYS = int(os.environ.get("STALE_DAYS", "10"))
 
 
 # ---------------------------------------------------------------- http helpers
@@ -1173,6 +1178,24 @@ def run_migrations(conn):
     return len(applied)
 
 
+def stale_sources(conn, max_age_days=None):
+    """Return [(source, newest_filed_at)] for sources gone quiet too long.
+
+    This is the backstop for failures that raise no error of their own: a
+    source that returns nothing, a parser that silently stops matching, or a
+    pull that never ran. A healthy source keeps publishing, so the newest
+    filing date is proof of life.
+    """
+    if max_age_days is None:
+        max_age_days = STALE_DAYS
+    with conn.cursor() as cur:
+        cur.execute("SELECT source, max(filed_at) FROM filings GROUP BY source")
+        rows = cur.fetchall()
+    cutoff = date.today() - timedelta(days=max_age_days)
+    return [(src, latest) for src, latest in rows
+            if latest is None or latest < cutoff]
+
+
 def upsert_filing(cur, filing):
     cur.execute(
         """INSERT INTO filings (id, source, filer, report_type, filed_at, raw_url)
@@ -1306,6 +1329,10 @@ def main():
                 conn.rollback()
                 log(f"ERROR house: {e!r}")
                 failed.append("house")
+            for src, latest in stale_sources(conn):
+                log(f"ERROR stale: {src} newest filing is {latest} "
+                    f"(older than {STALE_DAYS}d)")
+                failed.append(f"{src} (stale)")
     except Exception as e:
         log(f"ERROR: {e!r}")
         sys.exit(1)

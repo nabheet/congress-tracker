@@ -15,7 +15,7 @@ import runpy
 import time
 import urllib.error
 import urllib.request
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -1171,6 +1171,31 @@ class TestRunMigrations:
             pc.run_migrations(conn)
 
 
+# ---------------------------------------------------------------- staleness
+
+class TestStaleSources:
+    def test_flags_source_older_than_window(self):
+        old = date.today() - timedelta(days=11)
+        cur = FakeCursor(fetchall_result=[("senate", old), ("house", date.today())])
+        assert pc.stale_sources(FakeConn(cursors=[cur]), 10) == [("senate", old)]
+
+    def test_fresh_sources_pass(self):
+        cur = FakeCursor(fetchall_result=[
+            ("senate", date.today() - timedelta(days=2)), ("house", date.today())])
+        assert pc.stale_sources(FakeConn(cursors=[cur]), 10) == []
+
+    def test_source_with_no_dates_is_stale(self):
+        cur = FakeCursor(fetchall_result=[("senate", None)])
+        assert pc.stale_sources(FakeConn(cursors=[cur]), 10) == [("senate", None)]
+
+    def test_window_is_configurable(self):
+        cur = FakeCursor(fetchall_result=[("house", date.today() - timedelta(days=4))])
+        assert pc.stale_sources(FakeConn(cursors=[cur]), 10) == []
+        cur = FakeCursor(fetchall_result=[("house", date.today() - timedelta(days=4))])
+        assert pc.stale_sources(FakeConn(cursors=[cur]), 3) == [
+            ("house", date.today() - timedelta(days=4))]
+
+
 # ---------------------------------------------------------------- run_senate
 
 class TestRunSenate:
@@ -1610,6 +1635,32 @@ class TestMain:
         out = capsys.readouterr().out
         assert "failed sources: senate, house" in out
         assert conn.rollbacks == 2
+
+    def test_stale_source_exits_nonzero(self, monkeypatch, capsys):
+        monkeypatch.setattr(pc, "db_conn", lambda: FakeConn())
+        monkeypatch.setattr(pc, "run_migrations", lambda conn: None)
+        monkeypatch.setattr(pc, "run_senate", lambda conn, start=None, end=None: (0, 0))
+        monkeypatch.setattr(pc, "run_house", lambda conn, refresh=False: (0, 0))
+        monkeypatch.setattr(pc, "stale_sources",
+                            lambda conn: [("senate", date(2026, 10, 21))])
+        monkeypatch.delenv("START_DATE", raising=False)
+        monkeypatch.delenv("END_DATE", raising=False)
+        with pytest.raises(SystemExit) as exc:
+            pc.main()
+        assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert "ERROR stale: senate" in out
+        assert "senate (stale)" in out
+
+    def test_fresh_sources_do_not_exit(self, monkeypatch):
+        monkeypatch.setattr(pc, "db_conn", lambda: FakeConn())
+        monkeypatch.setattr(pc, "run_migrations", lambda conn: None)
+        monkeypatch.setattr(pc, "run_senate", lambda conn, start=None, end=None: (0, 0))
+        monkeypatch.setattr(pc, "run_house", lambda conn, refresh=False: (0, 0))
+        monkeypatch.setattr(pc, "stale_sources", lambda conn: [])
+        monkeypatch.delenv("START_DATE", raising=False)
+        monkeypatch.delenv("END_DATE", raising=False)
+        pc.main()
 
     def test_main_guard(self, monkeypatch):
         # __main__ block must call main() and exit nonzero when db_conn fails

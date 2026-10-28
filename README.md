@@ -97,6 +97,7 @@ Environment variables (see `.env.example`):
 | `START_DATE` / `END_DATE` | — | Explicit ISO date range (overrides `DAYS_BACK`; Senate only) |
 | `REFRESH_HOUSE` | `0` | Boolean (`1`/`true`/`yes`/`on`); re-parse existing House PTR filings and replace their trades (see backfills below) |
 | `MIGRATIONS_DIR` | `migrations` | Directory of `.sql` migration files |
+| `STALE_DAYS` | `10` | Exit nonzero when a source's newest filing is older than this. Catches a source that stopped working without raising an error |
 
 ## Data coverage and backfills
 
