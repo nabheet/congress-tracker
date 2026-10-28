@@ -1174,6 +1174,20 @@ class TestRunMigrations:
 # ---------------------------------------------------------------- staleness
 
 class TestStaleSources:
+    """Staleness is measured on *parsed* filings, not on filing rows.
+
+    Index rows are committed before parsing, so a filing date alone proves
+    nothing about whether trades are being extracted.
+    """
+
+    def test_query_keys_on_parsed_filings(self):
+        cur = FakeCursor(fetchall_result=[])
+        pc.stale_sources(FakeConn(cursors=[cur]), 10)
+        sql = cur.calls[0][0]
+        assert "max(f.filed_at)" in sql
+        assert "FILTER" in sql and "EXISTS (SELECT 1 FROM trades" in sql
+        assert "GROUP BY f.source" in sql
+
     def test_flags_source_older_than_window(self):
         old = date.today() - timedelta(days=11)
         cur = FakeCursor(fetchall_result=[("senate", old), ("house", date.today())])
@@ -1184,16 +1198,24 @@ class TestStaleSources:
             ("senate", date.today() - timedelta(days=2)), ("house", date.today())])
         assert pc.stale_sources(FakeConn(cursors=[cur]), 10) == []
 
-    def test_source_with_no_dates_is_stale(self):
-        cur = FakeCursor(fetchall_result=[("senate", None)])
+    def test_source_missing_from_results_is_stale(self):
+        # A source with no rows produces no GROUP BY group; it must still be
+        # reported, otherwise "the pull never ran" stays invisible.
+        cur = FakeCursor(fetchall_result=[("house", date.today())])
         assert pc.stale_sources(FakeConn(cursors=[cur]), 10) == [("senate", None)]
 
+    def test_source_with_only_unparsed_filings_is_stale(self):
+        # New filing rows, zero trades parsed: the outage this catches.
+        cur = FakeCursor(fetchall_result=[("senate", None), ("house", None)])
+        assert pc.stale_sources(FakeConn(cursors=[cur]), 10) == [
+            ("senate", None), ("house", None)]
+
     def test_window_is_configurable(self):
-        cur = FakeCursor(fetchall_result=[("house", date.today() - timedelta(days=4))])
+        four_days = date.today() - timedelta(days=4)
+        cur = FakeCursor(fetchall_result=[("senate", date.today()), ("house", four_days)])
         assert pc.stale_sources(FakeConn(cursors=[cur]), 10) == []
-        cur = FakeCursor(fetchall_result=[("house", date.today() - timedelta(days=4))])
-        assert pc.stale_sources(FakeConn(cursors=[cur]), 3) == [
-            ("house", date.today() - timedelta(days=4))]
+        cur = FakeCursor(fetchall_result=[("senate", date.today()), ("house", four_days)])
+        assert pc.stale_sources(FakeConn(cursors=[cur]), 3) == [("house", four_days)]
 
 
 # ---------------------------------------------------------------- run_senate
@@ -1518,6 +1540,7 @@ class TestMain:
         monkeypatch.setattr(pc, "run_house", lambda conn, refresh=False: (0, 0))
         monkeypatch.setenv("START_DATE", "2026-08-01")
         monkeypatch.setenv("END_DATE", "2026-09-01")
+        monkeypatch.setattr(pc, "stale_sources", lambda conn: [])
         pc.main()
         assert seen["start"] == date(2026, 8, 1)
         assert seen["end"] == date(2026, 9, 1)
@@ -1532,6 +1555,7 @@ class TestMain:
                             lambda conn, refresh=False: calls.setdefault("house", (3, 4)))
         monkeypatch.delenv("START_DATE", raising=False)
         monkeypatch.delenv("END_DATE", raising=False)
+        monkeypatch.setattr(pc, "stale_sources", lambda conn: [])
         pc.main()
         out = capsys.readouterr().out
         assert "senate done: 1 new filings, 2 new trades" in out
@@ -1548,6 +1572,7 @@ class TestMain:
         monkeypatch.delenv("START_DATE", raising=False)
         monkeypatch.delenv("END_DATE", raising=False)
         monkeypatch.delenv("REFRESH_HOUSE", raising=False)
+        monkeypatch.setattr(pc, "stale_sources", lambda conn: [])
         pc.main()
         assert seen["refresh"] is False
 
