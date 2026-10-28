@@ -73,6 +73,10 @@ SOURCES = ("senate", "house")
 # days, so the window is deliberately generous: it is meant to catch a source
 # that stopped working, not a quiet week.
 STALE_DAYS = int(os.environ.get("STALE_DAYS", "10"))
+# How many times to download and re-parse a PTR PDF that yields no trades
+# before skipping it. Scanned filings the OCR engine cannot read otherwise cost
+# minutes of tesseract on every run, forever. REFRESH_HOUSE resets them.
+PTR_MAX_ATTEMPTS = int(os.environ.get("PTR_MAX_ATTEMPTS", "3"))
 
 
 # ---------------------------------------------------------------- http helpers
@@ -1095,18 +1099,31 @@ def run_house(conn, years=None, refresh=False):
 
     With refresh=True, every PTR filing is re-downloaded and re-parsed and its
     trades are replaced, healing rows stored by older parser versions (e.g.
-    truncated comments). Never set by the cron schedule.
+    truncated comments). Never set by the cron schedule. It also clears the
+    attempt counters so a parser improvement retries the whole backlog.
+
+    A PDF that yields no trades (typically a low-DPI scan the OCR engine cannot
+    read) is retried at most PTR_MAX_ATTEMPTS times and then skipped, so the
+    daily run stops paying minutes of OCR per document for rows it discards.
     """
     s = Session()
     if years is None:
         today = date.today()
         years = [today.year, today.year - 1]  # current + prior year catches late filings
     if not refresh:
+        # One query for both kinds of skip: already parsed, and given up on.
         with conn.cursor() as cur:
-            cur.execute("SELECT DISTINCT filing_id FROM trades")
+            cur.execute(
+                """SELECT f.id FROM filings f
+                    WHERE EXISTS (SELECT 1 FROM trades t WHERE t.filing_id = f.id)
+                       OR f.parse_attempts >= %s""",
+                (PTR_MAX_ATTEMPTS,))
             done = {r[0] for r in cur.fetchall()}
     else:
         done = set()
+        with conn.cursor() as cur:
+            cur.execute("UPDATE filings SET parse_attempts = 0, "
+                        "parse_attempted_at = NULL WHERE parse_attempts > 0")
     new_filings = 0
     new_trades = 0
     for year in sorted(years):
@@ -1139,6 +1156,23 @@ def run_house(conn, years=None, refresh=False):
                     insert_trades(cur, filing["id"], trades)
                 new_trades += len(trades)
                 conn.commit()
+            else:
+                # Nothing extractable. Count it so the next runs can give up
+                # instead of re-downloading and re-OCR'ing the same scan.
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE filings
+                              SET parse_attempts = parse_attempts + 1,
+                                  parse_attempted_at = now()
+                            WHERE id = %s
+                        RETURNING parse_attempts""",
+                        (filing["id"],))
+                    row = cur.fetchone()
+                conn.commit()
+                if row and row[0] == PTR_MAX_ATTEMPTS:
+                    print(f"house: giving up on {filing['id']} after "
+                          f"{row[0]} attempts, no trades extractable",
+                          flush=True)
             time.sleep(0.2)  # be polite to the PDF server
     conn.commit()
     return new_filings, new_trades
