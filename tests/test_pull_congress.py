@@ -1548,6 +1548,69 @@ class TestMain:
         assert exc.value.code == 1
         assert "ERROR" in capsys.readouterr().out
 
+    def test_senate_failure_still_runs_house(self, monkeypatch, capsys):
+        # A dead Senate source must not cost us the House pull, but the run
+        # must still exit nonzero so the failure stays visible.
+        conn = FakeConn()
+        monkeypatch.setattr(pc, "db_conn", lambda: conn)
+        monkeypatch.setattr(pc, "run_migrations", lambda conn: None)
+
+        def boom(*a, **k):
+            raise pc.RateLimited("giving up after 4 attempts")
+
+        monkeypatch.setattr(pc, "run_senate", boom)
+        monkeypatch.setattr(pc, "run_house", lambda conn, refresh=False: (3, 4))
+        monkeypatch.delenv("START_DATE", raising=False)
+        monkeypatch.delenv("END_DATE", raising=False)
+        with pytest.raises(SystemExit) as exc:
+            pc.main()
+        assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert "ERROR senate" in out
+        assert "house done: 3 new filings, 4 new trades" in out
+        assert "failed sources: senate" in out
+        assert conn.rollbacks == 1
+
+    def test_house_failure_exits_nonzero(self, monkeypatch, capsys):
+        conn = FakeConn()
+        monkeypatch.setattr(pc, "db_conn", lambda: conn)
+        monkeypatch.setattr(pc, "run_migrations", lambda conn: None)
+        monkeypatch.setattr(pc, "run_senate", lambda conn, start=None, end=None: (1, 2))
+
+        def boom(*a, **k):
+            raise RuntimeError("pdf exploded")
+
+        monkeypatch.setattr(pc, "run_house", boom)
+        monkeypatch.delenv("START_DATE", raising=False)
+        monkeypatch.delenv("END_DATE", raising=False)
+        with pytest.raises(SystemExit) as exc:
+            pc.main()
+        assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert "senate done: 1 new filings, 2 new trades" in out
+        assert "ERROR house" in out
+        assert "failed sources: house" in out
+        assert conn.rollbacks == 1
+
+    def test_both_sources_fail(self, monkeypatch, capsys):
+        conn = FakeConn()
+        monkeypatch.setattr(pc, "db_conn", lambda: conn)
+        monkeypatch.setattr(pc, "run_migrations", lambda conn: None)
+
+        def boom(*a, **k):
+            raise RuntimeError("down")
+
+        monkeypatch.setattr(pc, "run_senate", boom)
+        monkeypatch.setattr(pc, "run_house", boom)
+        monkeypatch.delenv("START_DATE", raising=False)
+        monkeypatch.delenv("END_DATE", raising=False)
+        with pytest.raises(SystemExit) as exc:
+            pc.main()
+        assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert "failed sources: senate, house" in out
+        assert conn.rollbacks == 2
+
     def test_main_guard(self, monkeypatch):
         # __main__ block must call main() and exit nonzero when db_conn fails
         # (missing PG_PASS_FILE), without raising outside main's error handling.

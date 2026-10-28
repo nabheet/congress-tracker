@@ -59,6 +59,7 @@ class FakeConn:
         self.cursors = cursors if cursors is not None else []
         self.all_cursors = []
         self.commits = 0
+        self.rollbacks = 0
 
     def cursor(self):
         cur = self.cursors.pop(0) if self.cursors else FakeCursor()
@@ -67,6 +68,9 @@ class FakeConn:
 
     def commit(self):
         self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
 
     def __enter__(self):
         return self
