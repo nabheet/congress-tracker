@@ -65,10 +65,13 @@ PG_DB = os.environ.get("PG_DB", "congress")
 PG_USER = os.environ.get("PG_USER", "postgres")
 PG_PASS_FILE = os.environ.get("POSTGRES_PASSWORD_FILE", "/run/secrets/postgres_password")
 MIGRATIONS_DIR = os.environ.get("MIGRATIONS_DIR", "migrations")
-# Exit nonzero when a source's newest filing is older than this. Filings lag
-# publication by days, and both chambers go quiet in recess, so the window is
-# generous: the point is to catch a source that stopped working, not to nag
-# about a slow week.
+# Sources that must keep producing parsed filings; the staleness check covers
+# every one of them, including a source that produced no rows at all.
+SOURCES = ("senate", "house")
+# Exit nonzero when a source's newest parsed filing is older than this. Market
+# holidays, recesses, and publication lag all push the newest filing back by
+# days, so the window is deliberately generous: it is meant to catch a source
+# that stopped working, not a quiet week.
 STALE_DAYS = int(os.environ.get("STALE_DAYS", "10"))
 
 
@@ -1179,21 +1182,32 @@ def run_migrations(conn):
 
 
 def stale_sources(conn, max_age_days=None):
-    """Return [(source, newest_filed_at)] for sources gone quiet too long.
+    """Return [(source, newest_parsed_filed_at)] for sources that stopped producing.
 
-    This is the backstop for failures that raise no error of their own: a
-    source that returns nothing, a parser that silently stops matching, or a
-    pull that never ran. A healthy source keeps publishing, so the newest
-    filing date is proof of life.
+    Proof of life is a *parsed* filing — one that has at least one trade row —
+    not merely a filing row. Index rows are committed before the PDF or print
+    view is parsed, so a filing date alone keeps advancing while trade
+    extraction is silently broken. See the House leg: the index row is upserted
+    and committed, then the PDF is fetched, and every failure path there
+    returns an empty list rather than raising.
+
+    Every source in SOURCES is checked, so a source that produced no rows at
+    all is reported too; a GROUP BY alone would omit it.
     """
     if max_age_days is None:
         max_age_days = STALE_DAYS
     with conn.cursor() as cur:
-        cur.execute("SELECT source, max(filed_at) FROM filings GROUP BY source")
-        rows = cur.fetchall()
+        cur.execute(
+            """SELECT f.source,
+                      max(f.filed_at) FILTER (
+                          WHERE EXISTS (SELECT 1 FROM trades t
+                                        WHERE t.filing_id = f.id)) AS newest_parsed
+                 FROM filings f
+                GROUP BY f.source""")
+        rows = {src: newest for src, newest in cur.fetchall()}
     cutoff = date.today() - timedelta(days=max_age_days)
-    return [(src, latest) for src, latest in rows
-            if latest is None or latest < cutoff]
+    return [(src, rows.get(src)) for src in SOURCES
+            if rows.get(src) is None or rows[src] < cutoff]
 
 
 def upsert_filing(cur, filing):
