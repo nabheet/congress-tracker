@@ -1453,18 +1453,122 @@ class TestRunHouse:
                 "SP Apple Inc. (AAPL) [ST] P 09/01/2026 09/05/2026 $1,001 - $15,000")]))
 
         # Trades already exist, so a plain run would skip the PDF. refresh=True
-        # must ignore `done`, re-fetch the PDF, delete the stale rows, and
-        # re-insert freshly parsed trades.
-        cur_done = FakeCursor(fetchall_result=[("house:111",)])
+        # must clear the attempt counters, ignore `done`, re-fetch the PDF,
+        # delete the stale rows, and re-insert freshly parsed trades.
+        cur_reset = FakeCursor()
+        cur_up = FakeCursor()
         cur_trades = FakeCursor()
-        conn = FakeConn(cursors=[cur_done, cur_trades])
+        conn = FakeConn(cursors=[cur_reset, cur_up, cur_trades])
         nf, nt = pc.run_house(conn, years=[year], refresh=True)
         assert nf == 1
         assert nt == 1
         assert fake.request_bytes_calls == [zip_url, pdf_url]  # PDF re-fetched
+        assert any("SET parse_attempts = 0" in c[0] for c in cur_reset.calls)
         deletes = [c for c in cur_trades.calls
                    if c[0] == "DELETE FROM trades WHERE filing_id = %s"]
         assert deletes == [("DELETE FROM trades WHERE filing_id = %s", ("house:111",))]
+
+    def test_zero_trade_ptr_is_counted_and_not_refetched(self, monkeypatch, capsys):
+        """A PDF that yields no trades is retried a bounded number of times.
+
+        The scanned filings cost minutes of OCR each; without a cap they are
+        re-downloaded on every run forever.
+        """
+        year = 2026
+        xml = """<?xml version="1.0"?>
+<Members>
+  <Member><Last>Smith</Last><First>John</First><FilingType>P</FilingType>
+    <FilingDate>09/01/2026</FilingDate><DocID>111</DocID></Member>
+</Members>
+"""
+        zip_url = pc.HOUSE_PUBLIC + f"/financial-pdfs/{year}FD.zip"
+        pdf_url = pc.HOUSE_PUBLIC + f"/ptr-pdfs/{year}/111.pdf"
+        fake = FakeSession(bytes_by_url={zip_url: make_fd_zip(year, xml),
+                                         pdf_url: b"%PDF-fake"})
+        monkeypatch.setattr(pc, "Session", lambda: fake)
+        monkeypatch.setattr(pc.time, "sleep", lambda s: None)
+        # Unparseable text layer: no trades, so the filing stays unparsed.
+        monkeypatch.setattr(pc.pdfplumber, "open",
+                            lambda *a, **k: FakePdf([FakePdfPage("nothing here")]))
+
+        cur_done = FakeCursor(fetchall_result=[])     # neither parsed nor given up
+        cur_up = FakeCursor(fetchone_result=(True,))
+        cur_count = FakeCursor(fetchone_result=(1,))  # first attempt
+        conn = FakeConn(cursors=[cur_done, cur_up, cur_count])
+        nf, nt = pc.run_house(conn, years=[year])
+        assert (nf, nt) == (1, 0)
+        assert fake.request_bytes_calls == [zip_url, pdf_url]
+        updates = [c for c in cur_count.calls if "parse_attempts + 1" in c[0]]
+        assert len(updates) == 1
+        assert "parse_attempted_at = now()" in updates[0][0]
+        assert updates[0][1] == ("house:111",)
+
+    def test_given_up_ptr_is_skipped_without_fetch(self, monkeypatch, capsys):
+        year = 2026
+        xml = """<?xml version="1.0"?>
+<Members>
+  <Member><Last>Smith</Last><First>John</First><FilingType>P</FilingType>
+    <FilingDate>09/01/2026</FilingDate><DocID>111</DocID></Member>
+</Members>
+"""
+        zip_url = pc.HOUSE_PUBLIC + f"/financial-pdfs/{year}FD.zip"
+        fake = FakeSession(bytes_by_url={zip_url: make_fd_zip(year, xml)})
+        monkeypatch.setattr(pc, "Session", lambda: fake)
+        monkeypatch.setattr(pc.time, "sleep", lambda s: None)
+
+        # The skip query returns the filing: already parsed, or past the cap.
+        cur_skip = FakeCursor(fetchall_result=[("house:111",)])
+        cur_up = FakeCursor(fetchone_result=(True,))
+        conn = FakeConn(cursors=[cur_skip, cur_up])
+        nf, nt = pc.run_house(conn, years=[year])
+        assert (nf, nt) == (1, 0)
+        assert fake.request_bytes_calls == [zip_url]   # no PDF fetch
+
+    def test_skip_query_honours_attempt_cap(self, monkeypatch):
+        year = 2026
+        xml = """<?xml version="1.0"?>
+<Members>
+  <Member><Last>Smith</Last><First>John</First><FilingType>P</FilingType>
+    <FilingDate>09/01/2026</FilingDate><DocID>111</DocID></Member>
+</Members>
+"""
+        zip_url = pc.HOUSE_PUBLIC + f"/financial-pdfs/{year}FD.zip"
+        fake = FakeSession(bytes_by_url={zip_url: make_fd_zip(year, xml)})
+        monkeypatch.setattr(pc, "Session", lambda: fake)
+        monkeypatch.setattr(pc.time, "sleep", lambda s: None)
+        monkeypatch.setattr(pc, "PTR_MAX_ATTEMPTS", 7)
+
+        cur_skip = FakeCursor(fetchall_result=[("house:111",)])
+        conn = FakeConn(cursors=[cur_skip])
+        pc.run_house(conn, years=[year], refresh=False)
+        sql, params = cur_skip.calls[0]
+        assert "parse_attempts >=" in sql
+        assert params == (7,)
+
+    def test_giving_up_is_logged_once(self, monkeypatch, capsys):
+        year = 2026
+        xml = """<?xml version="1.0"?>
+<Members>
+  <Member><Last>Smith</Last><First>John</First><FilingType>P</FilingType>
+    <FilingDate>09/01/2026</FilingDate><DocID>111</DocID></Member>
+</Members>
+"""
+        zip_url = pc.HOUSE_PUBLIC + f"/financial-pdfs/{year}FD.zip"
+        pdf_url = pc.HOUSE_PUBLIC + f"/ptr-pdfs/{year}/111.pdf"
+        fake = FakeSession(bytes_by_url={zip_url: make_fd_zip(year, xml),
+                                         pdf_url: b"%PDF-fake"})
+        monkeypatch.setattr(pc, "Session", lambda: fake)
+        monkeypatch.setattr(pc.time, "sleep", lambda s: None)
+        monkeypatch.setattr(pc.pdfplumber, "open",
+                            lambda *a, **k: FakePdf([FakePdfPage("nothing here")]))
+        monkeypatch.setattr(pc, "PTR_MAX_ATTEMPTS", 3)
+
+        cur_done = FakeCursor(fetchall_result=[])
+        cur_up = FakeCursor(fetchone_result=(True,))
+        cur_count = FakeCursor(fetchone_result=(3,))  # this attempt hit the cap
+        conn = FakeConn(cursors=[cur_done, cur_up, cur_count])
+        pc.run_house(conn, years=[year])
+        assert "giving up on house:111 after 3 attempts" in capsys.readouterr().out
 
     def test_skips_low_confidence_ocr(self, monkeypatch, capsys):
         year = 2026
