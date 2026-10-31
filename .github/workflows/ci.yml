@@ -8,7 +8,13 @@ on:
     branches: [main]
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # Cancels superseded PR runs only. Never cancel a push to main or a tag:
+  # cancellation kills the whole run, including `publish-image`, and a
+  # half-finished publish leaves the image pushed without its GitHub release
+  # (or the reverse). github.head_ref is set only on pull_request events, so
+  # main pushes and tag pushes fall back to the unique run id and never cancel
+  # each other.
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
