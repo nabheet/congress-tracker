@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # uv — copy pinned binary from the official image
-COPY --from=ghcr.io/astral-sh/uv:0.12.10 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.13.6 /uv /uvx /bin/
 
 # supercronic — cron daemon for containers (runs as PID 1, logs to stdout).
 # Digest verified at build time (sha256 of the v0.2.49 release binary).
