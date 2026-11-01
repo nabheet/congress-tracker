@@ -60,7 +60,7 @@ for fid in ids:
     row = cur.fetchone()
     if not row:
         continue
-    trades = pc.house_ptr_trades(s, row[0])   # re-downloads + parses PDF
+    trades = pc.house_ptr_trades(s, row[0])  # re-downloads + parses PDF
     if trades:
         cur.execute("DELETE FROM trades WHERE filing_id = %s", (fid,))
         pc.insert_trades(cur, fid, trades)

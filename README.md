@@ -50,7 +50,7 @@ schema: `filings` (natural-keyed, one per disclosure) and `trades`
 
 ## Layout
 
-```
+```text
 pull_congress.py   main script (fetch → parse → upsert)
 migrations/        versioned SQL migrations
 queries/           analysis SQL (see "Analyzing the data")
@@ -86,19 +86,31 @@ full resolved tree. Rebuild the lockfile after dependency changes with
 Environment variables (see `.env.example`):
 
 | Variable | Default | Purpose |
-|---|---|---|
+| --- | --- | --- |
 | `PG_HOST` / `PG_PORT` | `db` / `5432` | Postgres host / port |
 | `PG_DB` / `PG_USER` | `congress` / `postgres` | Database / user |
-| `POSTGRES_PASSWORD_FILE` | `/run/secrets/postgres_password` | File containing the DB password (container secret) |
 | `SENATE_BASE` | `https://efdsearch.senate.gov` | Senate eFD site base |
 | `HOUSE_SITE` | `https://disclosures-clerk.house.gov` | House Clerk site base |
-| `HOUSE_PUBLIC` | `https://disclosures-clerk.house.gov/public_disc` | House public disclosure dir (ZIP index + PDFs) |
-| `DAYS_BACK` | `30` | Rolling window of Senate days to pull when no explicit range |
-| `START_DATE` / `END_DATE` | — | Explicit ISO date range (overrides `DAYS_BACK`; Senate only) |
-| `REFRESH_HOUSE` | `0` | Boolean (`1`/`true`/`yes`/`on`); re-parse existing House PTR filings and replace their trades (see backfills below) |
-| `MIGRATIONS_DIR` | `migrations` | Directory of `.sql` migration files |
-| `PTR_MAX_ATTEMPTS` | `3` | How many times to re-download and re-parse a House PTR PDF that yields no trades before skipping it. `REFRESH_HOUSE` resets the counters |
-| `STALE_DAYS` | `10` | Exit nonzero when a source's newest **parsed** filing (one with trades) is older than this. Catches a source that stopped working without raising an error |
+| `DAYS_BACK` | `30` | Senate days to pull when no range |
+| `START_DATE` / `END_DATE` | — | Explicit ISO range (Senate only) |
+| `MIGRATIONS_DIR` | `migrations` | Directory of `.sql` migrations |
+| `STALE_DAYS` | `10` | Exit nonzero when a source looks stale |
+
+Longer ones:
+
+- `POSTGRES_PASSWORD_FILE` — default `/run/secrets/postgres_password`; file
+  containing the DB password (container secret).
+- `HOUSE_PUBLIC` — default `https://disclosures-clerk.house.gov/public_disc`;
+  House public disclosure dir (ZIP index + PDFs).
+- `REFRESH_HOUSE` — default `0`; boolean (`1`/`true`/`yes`/`on`) that re-parses
+  existing House PTR filings and replaces their trades (see backfills below).
+- `PTR_MAX_ATTEMPTS` — default `3`; how many times to re-download and re-parse a
+  House PTR PDF that yields no trades before skipping it. `REFRESH_HOUSE` resets
+  the counters.
+
+`STALE_DAYS` exits nonzero when a source's newest **parsed** filing (one with
+trades) is older than the limit — it catches a source that stopped working
+without raising an error.
 
 ## Data coverage and backfills
 

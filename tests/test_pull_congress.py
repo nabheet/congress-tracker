@@ -12,7 +12,6 @@ Coverage targets (no network / DB / PDF):
 
 import json
 import runpy
-import time
 import urllib.error
 import urllib.request
 from datetime import date, timedelta
@@ -22,11 +21,10 @@ import pytest
 from PIL import Image, ImageDraw
 
 import pull_congress as pc
-from tests.conftest import (
-    FakeConn, FakeCursor, FakeOpener, FakeResponse, FakeSession, make_fd_zip)
-
+from tests.conftest import FakeConn, FakeCursor, FakeOpener, FakeResponse, FakeSession, make_fd_zip
 
 # ---------------------------------------------------------------- csrf_from
+
 
 class TestCsrfFrom:
     def test_standard_order(self):
@@ -89,6 +87,7 @@ class TestSenateTradesFromHtml:
 
 # ---------------------------------------------------------------- house PTR text parsing
 
+
 class TestHouseTradesFromText:
     def test_empty_text_returns_empty(self):
         assert pc.house_trades_from_text("") == []
@@ -126,35 +125,36 @@ class TestHouseTradesFromText:
         assert trades[0]["type"] == "Purchase (partial)"
 
     def test_amount_split_across_lines(self):
-        text = ("Apple Inc. (AAPL) [ST] P 09/01/2026 09/05/2026 $1,001 -\n"
-                "$15,000")
+        text = "Apple Inc. (AAPL) [ST] P 09/01/2026 09/05/2026 $1,001 -\n$15,000"
         trades = pc.house_trades_from_text(text)
         assert trades[0]["amount"] == "$1,001 - $15,000"
 
     def test_wrapped_asset_lines_joined(self):
-        text = ("P 09/01/2026 09/05/2026 $1,001 - $15,000\n"
-                "Indust Avg ETF Trust NYSEARCA:\n"
-                "DIA [OT]")
+        text = "P 09/01/2026 09/05/2026 $1,001 - $15,000\nIndust Avg ETF Trust NYSEARCA:\nDIA [OT]"
         trades = pc.house_trades_from_text(text)
         assert trades[0]["asset_name"] == "Indust Avg ETF Trust NYSEARCA"
         assert trades[0]["ticker"] == "DIA"
         assert trades[0]["asset_type"] == "OT"
 
     def test_comment_from_d_line(self):
-        text = ("Apple Inc. (AAPL) [ST] P 09/01/2026 09/05/2026 $1,001 - $15,000\n"
-                "D: Broker-assisted purchase")
+        text = (
+            "Apple Inc. (AAPL) [ST] P 09/01/2026 09/05/2026 $1,001 - $15,000\n"
+            "D: Broker-assisted purchase"
+        )
         trades = pc.house_trades_from_text(text)
         assert trades[0]["comment"] == "Broker-assisted purchase"
 
     def test_untradeable_lines_ignored(self):
-        text = ("Filing ID: 12345\n"
-                "Name: Some Member\n"
-                "I CERTIFY that the statements\n"
-                "* For the complete list of transactions")
+        text = (
+            "Filing ID: 12345\n"
+            "Name: Some Member\n"
+            "I CERTIFY that the statements\n"
+            "* For the complete list of transactions"
+        )
         assert pc.house_trades_from_text(text) == []
 
     def test_control_chars_stripped(self):
-        text = ("Apple Inc. (AAPL) [ST]\x00\x00 P 09/01/2026 09/05/2026 $1,001 - $15,000")
+        text = "Apple Inc. (AAPL) [ST]\x00\x00 P 09/01/2026 09/05/2026 $1,001 - $15,000"
         trades = pc.house_trades_from_text(text)
         assert trades[0]["ticker"] == "AAPL"
 
@@ -187,33 +187,41 @@ class TestHousePtrTradesColumnar:
         assert t1["type"] == "Exchange"
 
     def test_columnar_missing_amount_skipped(self):
-        text = "ID Owner Asset Transaction Date\nJT Apple Inc S 09/01/2026 09/05/2026\nno amount here"
+        text = (
+            "ID Owner Asset Transaction Date\nJT Apple Inc S 09/01/2026 09/05/2026\nno amount here"
+        )
         assert pc.house_trades_from_text(text) == []
 
     def test_over_marker(self):
-        text = ("ID Owner Asset Transaction Date\n"
-                "SP Apple Inc S 09/01/2026 09/05/2026 Over\n"
-                "[GS]\n$1,000,000")
+        text = (
+            "ID Owner Asset Transaction Date\n"
+            "SP Apple Inc S 09/01/2026 09/05/2026 Over\n"
+            "[GS]\n$1,000,000"
+        )
         trades = pc.house_trades_from_text(text)
         assert trades[0]["amount"] == "Over $1,000,000"
 
     def test_columnar_skips_fs_line(self):
-        text = ("ID Owner Asset Transaction Date\n"
-                "SP Apple Inc S 09/01/2026 09/05/2026\n"
-                "F S: Smith, John\n"
-                "[GS]\n"
-                "$1,000,000\n")
+        text = (
+            "ID Owner Asset Transaction Date\n"
+            "SP Apple Inc S 09/01/2026 09/05/2026\n"
+            "F S: Smith, John\n"
+            "[GS]\n"
+            "$1,000,000\n"
+        )
         trades = pc.house_trades_from_text(text)
         assert trades[0]["amount"] == "$1,000,000"
         assert trades[0]["asset_type"] == "GS"
 
     def test_columnar_boundary_stops_amount_scan(self):
-        text = ("ID Owner Asset Transaction Date\n"
-                "SP Apple Inc S 09/01/2026 09/05/2026\n"
-                "I CERTIFY that the foregoing\n"
-                "JT Tesla Inc X 09/02/2026 09/06/2026\n"
-                "[ST]\n"
-                "$15,001 - $50,000\n")
+        text = (
+            "ID Owner Asset Transaction Date\n"
+            "SP Apple Inc S 09/01/2026 09/05/2026\n"
+            "I CERTIFY that the foregoing\n"
+            "JT Tesla Inc X 09/02/2026 09/06/2026\n"
+            "[ST]\n"
+            "$15,001 - $50,000\n"
+        )
         trades = pc.house_trades_from_text(text)
         assert len(trades) == 1
         assert trades[0]["owner"] == "Joint"
@@ -223,15 +231,17 @@ class TestHousePtrTradesColumnar:
         # so a comment line after the amount does not terminate the row:
         # the D: comment is captured, a second "D:" line joins it, and the
         # amount is preserved.
-        text = ("ID Owner Asset Transaction Date\n"
-                "SP Apple Inc S 09/01/2026 09/05/2026\n"
-                "[GS]\n"
-                "$1,000,000\n"
-                "D: sold some\n"
-                "D: second thought\n"
-                "JT Tesla Inc X 09/02/2026 09/06/2026\n"
-                "[ST]\n"
-                "$15,001 - $50,000\n")
+        text = (
+            "ID Owner Asset Transaction Date\n"
+            "SP Apple Inc S 09/01/2026 09/05/2026\n"
+            "[GS]\n"
+            "$1,000,000\n"
+            "D: sold some\n"
+            "D: second thought\n"
+            "JT Tesla Inc X 09/02/2026 09/06/2026\n"
+            "[ST]\n"
+            "$15,001 - $50,000\n"
+        )
         trades = pc.house_trades_from_text(text)
         assert len(trades) == 2
         assert trades[0]["owner"] == "Spouse"
@@ -240,19 +250,20 @@ class TestHousePtrTradesColumnar:
         assert trades[1]["owner"] == "Joint"
         assert trades[1]["comment"] is None
 
-
     def test_columnar_d_comment_plain_continuation_and_anchor(self):
         # A D: comment followed by a plain continuation line, then the next
         # row's anchor — exercises the inner D: scan window (plain-text join
         # and break on a following anchor).
-        text = ("ID Owner Asset Transaction Date\n"
-                "SP Apple Inc S 09/01/2026 09/05/2026\n"
-                "[GS]\n"
-                "D: sold some\n"
-                "due to rebalancing\n"
-                "JT Tesla Inc X 09/02/2026 09/06/2026\n"
-                "[ST]\n"
-                "$15,001 - $50,000\n")
+        text = (
+            "ID Owner Asset Transaction Date\n"
+            "SP Apple Inc S 09/01/2026 09/05/2026\n"
+            "[GS]\n"
+            "D: sold some\n"
+            "due to rebalancing\n"
+            "JT Tesla Inc X 09/02/2026 09/06/2026\n"
+            "[ST]\n"
+            "$15,001 - $50,000\n"
+        )
         trades = pc.house_trades_from_text(text)
         assert len(trades) == 1
         assert trades[0]["owner"] == "Joint"
@@ -261,56 +272,65 @@ class TestHousePtrTradesColumnar:
 
 # ---------------------------------------------------------------- parser edge cases
 
+
 class TestHouseParserEdgeCases:
     def test_amount_split_with_riding_asset_text(self):
-        text = ("SP Apple Inc. (AAPL) [ST] P 09/01/2026 09/05/2026 $15,001 -\n"
-                "no amount here\n"
-                "Stock (STT) [ST] $50,000\n")
+        text = (
+            "SP Apple Inc. (AAPL) [ST] P 09/01/2026 09/05/2026 $15,001 -\n"
+            "no amount here\n"
+            "Stock (STT) [ST] $50,000\n"
+        )
         trades = pc.house_trades_from_text(text)
         assert len(trades) == 1
         assert trades[0]["amount"] == "$15,001 - $50,000"
         assert trades[0]["ticker"] == "AAPL"
 
     def test_owner_from_so_line(self):
-        text = ("P 09/01/2026 09/05/2026 $1,001 - $15,000\n"
-                "S O: Jointly Held\n"
-                "P 09/02/2026 09/06/2026 $1,001 - $15,000\n")
+        text = (
+            "P 09/01/2026 09/05/2026 $1,001 - $15,000\n"
+            "S O: Jointly Held\n"
+            "P 09/02/2026 09/06/2026 $1,001 - $15,000\n"
+        )
         trades = pc.house_trades_from_text(text)
         assert trades[0]["owner"] == "Jointly Held"
 
     def test_wrapped_asset_lines_above_anchor(self):
-        text = ("Boring Fund\n"
-                "Class A\n"
-                "P 09/01/2026 09/05/2026 $1,001 - $15,000\n")
+        text = "Boring Fund\nClass A\nP 09/01/2026 09/05/2026 $1,001 - $15,000\n"
         trades = pc.house_trades_from_text(text)
         assert trades[0]["asset_name"] == "Boring Fund Class A"
 
     def test_comment_line_ends_asset_block(self):
-        text = ("P 09/01/2026 09/05/2026 $1,001 - $15,000\n"
-                "D: sold shares\n"
-                "P 09/02/2026 09/06/2026 $1,001 - $15,000\n")
+        text = (
+            "P 09/01/2026 09/05/2026 $1,001 - $15,000\n"
+            "D: sold shares\n"
+            "P 09/02/2026 09/06/2026 $1,001 - $15,000\n"
+        )
         trades = pc.house_trades_from_text(text)
         assert trades[0]["comment"] == "sold shares"
 
     def test_code_line_with_ticker(self):
-        text = ("P 09/01/2026 09/05/2026 $1,001 - $15,000\n"
-                "(AMZN) [ST]\n"
-                "P 09/02/2026 09/06/2026 $1,001 - $15,000\n")
+        text = (
+            "P 09/01/2026 09/05/2026 $1,001 - $15,000\n"
+            "(AMZN) [ST]\n"
+            "P 09/02/2026 09/06/2026 $1,001 - $15,000\n"
+        )
         trades = pc.house_trades_from_text(text)
         assert trades[0]["ticker"] == "AMZN"
         assert trades[0]["asset_type"] == "ST"
 
     def test_ticker_only_wrapped_line(self):
-        text = ("P 09/01/2026 09/05/2026 $1,001 - $15,000\n"
-                "(WMT)\n"
-                "P 09/02/2026 09/06/2026 $1,001 - $15,000\n")
+        text = (
+            "P 09/01/2026 09/05/2026 $1,001 - $15,000\n"
+            "(WMT)\n"
+            "P 09/02/2026 09/06/2026 $1,001 - $15,000\n"
+        )
         trades = pc.house_trades_from_text(text)
         assert trades[0]["ticker"] == "WMT"
 
     def test_bare_ticker_from_wrapped_asset_text(self):
-        text = ("Indust Avg ETF Trust NYSEARCA:\n"
-                "DIA [OT]\n"
-                "P 09/01/2026 09/05/2026 $1,001 - $15,000\n")
+        text = (
+            "Indust Avg ETF Trust NYSEARCA:\nDIA [OT]\nP 09/01/2026 09/05/2026 $1,001 - $15,000\n"
+        )
         trades = pc.house_trades_from_text(text)
         assert trades[0]["ticker"] == "DIA"
         assert trades[0]["asset_type"] == "OT"
@@ -318,15 +338,13 @@ class TestHouseParserEdgeCases:
     def test_asset_name_tail_not_ticker(self):
         # "LLC" ends the code line but is not a ticker; the bare-ticker
         # heuristic must reject it (and the asset name is kept intact).
-        text = ("HM Companies LLC [OI]\n"
-                "P 09/01/2026 09/05/2026 $1,001 - $15,000\n")
+        text = "HM Companies LLC [OI]\nP 09/01/2026 09/05/2026 $1,001 - $15,000\n"
         trades = pc.house_trades_from_text(text)
         assert trades[0]["ticker"] is None
         assert trades[0]["asset_name"] == "HM Companies LLC"
 
     def test_bills_tail_not_ticker(self):
-        text = ("U.S. Treasury Bills [GS]\n"
-                "P 09/01/2026 09/05/2026 $1,001 - $15,000\n")
+        text = "U.S. Treasury Bills [GS]\nP 09/01/2026 09/05/2026 $1,001 - $15,000\n"
         trades = pc.house_trades_from_text(text)
         assert trades[0]["ticker"] is None
         assert trades[0]["asset_name"] == "U.S. Treasury Bills"
@@ -334,23 +352,20 @@ class TestHouseParserEdgeCases:
     def test_lowercase_tail_not_ticker(self):
         # Lowercase tails ("Dog" from "Ski Mask Dog", "v.2" from
         # "Pathfinder 360 v.2") are asset names, not tickers.
-        text = ("Ski Mask Dog [CT]\n"
-                "P 09/01/2026 09/05/2026 $1,001 - $15,000\n")
+        text = "Ski Mask Dog [CT]\nP 09/01/2026 09/05/2026 $1,001 - $15,000\n"
         trades = pc.house_trades_from_text(text)
         assert trades[0]["ticker"] is None
         assert trades[0]["asset_name"] == "Ski Mask Dog"
 
     def test_asset_text_bare_ticker_rejected_for_tail(self):
         # Bare-ticker on the joined asset_text path also rejects tails.
-        text = ("P 09/01/2026 09/05/2026 $1,001 - $15,000\n"
-                "U.S. Treasury Bills [GS]\n")
+        text = "P 09/01/2026 09/05/2026 $1,001 - $15,000\nU.S. Treasury Bills [GS]\n"
         trades = pc.house_trades_from_text(text)
         assert trades[0]["ticker"] is None
 
     def test_bare_ticker_in_asset_text_kept(self):
         # A real all-caps bare ticker riding in the asset text is kept.
-        text = ("Invesco QQQ [OT]\n"
-                "P 09/01/2026 09/05/2026 $1,001 - $15,000\n")
+        text = "Invesco QQQ [OT]\nP 09/01/2026 09/05/2026 $1,001 - $15,000\n"
         trades = pc.house_trades_from_text(text)
         assert trades[0]["ticker"] == "QQQ"
 
@@ -358,18 +373,22 @@ class TestHouseParserEdgeCases:
         # Plain-text continuation lines join the comment; a second "D:" line
         # is excluded from BOUNDARY_RE (via "(?!D ?:)") and joins too, so
         # the D:-continuation branch is reachable.
-        text = ("SP Apple Inc. (AAPL) [ST] P 09/01/2026 09/05/2026 $1,001 - $15,000\n"
-                "D: sold shares\n"
-                "due to rebalancing\n"
-                "D: second thought\n"
-                "P 09/02/2026 09/06/2026 $1,001 - $15,000\n")
+        text = (
+            "SP Apple Inc. (AAPL) [ST] P 09/01/2026 09/05/2026 $1,001 - $15,000\n"
+            "D: sold shares\n"
+            "due to rebalancing\n"
+            "D: second thought\n"
+            "P 09/02/2026 09/06/2026 $1,001 - $15,000\n"
+        )
         trades = pc.house_trades_from_text(text)
         assert trades[0]["comment"] == "sold shares due to rebalancing second thought"
 
     def test_footer_stops_comment_scan(self):
-        text = ("P 09/01/2026 09/05/2026 $1,001 - $15,000\n"
-                "I CERTIFY that the foregoing\n"
-                "P 09/02/2026 09/06/2026 $1,001 - $15,000\n")
+        text = (
+            "P 09/01/2026 09/05/2026 $1,001 - $15,000\n"
+            "I CERTIFY that the foregoing\n"
+            "P 09/02/2026 09/06/2026 $1,001 - $15,000\n"
+        )
         trades = pc.house_trades_from_text(text)
         assert trades[0]["comment"] is None
 
@@ -377,10 +396,12 @@ class TestHouseParserEdgeCases:
         # A boundary line (here the next filing's "Name:" label) must stop the
         # comment locator so a D: line from the following filing is not
         # absorbed into the previous trade's comment.
-        text = ("P 09/01/2026 09/05/2026 $1,001 - $15,000\n"
-                "Name: Jane Smith\n"
-                "D: belongs to the next filing\n"
-                "P 09/02/2026 09/06/2026 $1,001 - $15,000\n")
+        text = (
+            "P 09/01/2026 09/05/2026 $1,001 - $15,000\n"
+            "Name: Jane Smith\n"
+            "D: belongs to the next filing\n"
+            "P 09/02/2026 09/06/2026 $1,001 - $15,000\n"
+        )
         trades = pc.house_trades_from_text(text)
         assert trades[0]["comment"] is None
 
@@ -408,8 +429,9 @@ FD_XML = """<?xml version="1.0"?>
 
 class TestHouseFilingIndex:
     def test_parses_members(self):
-        s = FakeSession(bytes_by_url={
-            pc.HOUSE_PUBLIC + "/financial-pdfs/2026FD.zip": make_fd_zip(2026, FD_XML)})
+        s = FakeSession(
+            bytes_by_url={pc.HOUSE_PUBLIC + "/financial-pdfs/2026FD.zip": make_fd_zip(2026, FD_XML)}
+        )
         rows = pc.house_filing_index(s, 2026)
         assert len(rows) == 2  # member without DocID is skipped
 
@@ -430,20 +452,26 @@ class TestHouseFilingIndex:
 
     def test_unknown_type_label(self):
         xml = FD_XML.replace("<FilingType>X</FilingType>", "<FilingType>ZZ</FilingType>")
-        s = FakeSession(bytes_by_url={
-            pc.HOUSE_PUBLIC + "/financial-pdfs/2026FD.zip": make_fd_zip(2026, xml)})
+        s = FakeSession(
+            bytes_by_url={pc.HOUSE_PUBLIC + "/financial-pdfs/2026FD.zip": make_fd_zip(2026, xml)}
+        )
         rows = pc.house_filing_index(s, 2026)
         assert rows[1]["report_type"] == "ZZ"
 
 
 # ---------------------------------------------------------------- db seams
 
+
 class TestUpsertFiling:
     def test_sql_and_params(self):
         cur = FakeCursor(fetchone_result=(True,))
         filing = {
-            "id": "senate:abc", "source": "senate", "filer": "John Smith",
-            "report_type": "PTR", "filed_at": None, "raw_url": "https://example.test/ptr",
+            "id": "senate:abc",
+            "source": "senate",
+            "filer": "John Smith",
+            "report_type": "PTR",
+            "filed_at": None,
+            "raw_url": "https://example.test/ptr",
         }
         inserted = pc.upsert_filing(cur, filing)
         assert inserted is True
@@ -456,8 +484,12 @@ class TestUpsertFiling:
     def test_returns_false_when_known(self):
         cur = FakeCursor(fetchone_result=(False,))
         filing = {
-            "id": "senate:abc", "source": "senate", "filer": "John Smith",
-            "report_type": "PTR", "filed_at": None, "raw_url": "https://example.test/ptr",
+            "id": "senate:abc",
+            "source": "senate",
+            "filer": "John Smith",
+            "report_type": "PTR",
+            "filed_at": None,
+            "raw_url": "https://example.test/ptr",
         }
         assert pc.upsert_filing(cur, filing) is False
 
@@ -466,10 +498,24 @@ class TestInsertTrades:
     def test_one_execute_per_trade(self):
         cur = FakeCursor()
         trades = [
-            {"ticker": "AAPL", "owner": "Self", "type": "Purchase", "amount": "$1,001 - $15,000",
-             "txn_date": "09/01/2026", "notif_date": "09/05/2026", "comment": None},
-            {"ticker": "MSFT", "owner": "Spouse", "type": "Sale", "amount": "$15,001 - $50,000",
-             "txn_date": "09/02/2026", "notif_date": "09/06/2026", "comment": "x"},
+            {
+                "ticker": "AAPL",
+                "owner": "Self",
+                "type": "Purchase",
+                "amount": "$1,001 - $15,000",
+                "txn_date": "09/01/2026",
+                "notif_date": "09/05/2026",
+                "comment": None,
+            },
+            {
+                "ticker": "MSFT",
+                "owner": "Spouse",
+                "type": "Sale",
+                "amount": "$15,001 - $50,000",
+                "txn_date": "09/02/2026",
+                "notif_date": "09/06/2026",
+                "comment": "x",
+            },
         ]
         pc.insert_trades(cur, "house:123", trades)
         assert len(cur.calls) == 2
@@ -484,9 +530,15 @@ class TestInsertTrades:
         # but still stored as-is: the parser must not fabricate dates.
         cur = FakeCursor()
         trades = [
-            {"ticker": "AAPL", "owner": "Self", "type": "Purchase",
-             "amount": "$1,001 - $15,000", "txn_date": "12/26/2026",
-             "notif_date": "01/21/2026", "comment": None},
+            {
+                "ticker": "AAPL",
+                "owner": "Self",
+                "type": "Purchase",
+                "amount": "$1,001 - $15,000",
+                "txn_date": "12/26/2026",
+                "notif_date": "01/21/2026",
+                "comment": None,
+            },
         ]
         pc.insert_trades(cur, "house:20033889", trades)
         out = capsys.readouterr().out
@@ -498,15 +550,22 @@ class TestInsertTrades:
     def test_no_warning_when_dates_in_order(self, capsys):
         cur = FakeCursor()
         trades = [
-            {"ticker": "AAPL", "owner": "Self", "type": "Purchase",
-             "amount": "$1,001 - $15,000", "txn_date": "09/01/2026",
-             "notif_date": "09/05/2026", "comment": None},
+            {
+                "ticker": "AAPL",
+                "owner": "Self",
+                "type": "Purchase",
+                "amount": "$1,001 - $15,000",
+                "txn_date": "09/01/2026",
+                "notif_date": "09/05/2026",
+                "comment": None,
+            },
         ]
         pc.insert_trades(cur, "house:123", trades)
         assert capsys.readouterr().out == ""
 
 
 # ---------------------------------------------------------------- Session._fetch
+
 
 def _http_error(code):
     return urllib.error.HTTPError("https://example.test/", code, "err", {}, None)
@@ -527,10 +586,12 @@ class TestSessionFetch:
         sleeps = []
         monkeypatch.setattr(pc.time, "sleep", lambda s: sleeps.append(s))
         s = pc.Session()
-        s.opener = FakeOpener([
-            _http_error(429),
-            FakeResponse(raw=b"ok", final_url="https://f/"),
-        ])
+        s.opener = FakeOpener(
+            [
+                _http_error(429),
+                FakeResponse(raw=b"ok", final_url="https://f/"),
+            ]
+        )
         raw, _ = s._fetch("https://example.test/", retries=4)
         assert raw == b"ok"
         assert sleeps == [10]  # 2**0 * 10
@@ -546,10 +607,14 @@ class TestSessionFetch:
         sleeps = []
         monkeypatch.setattr(pc.time, "sleep", lambda s: sleeps.append(s))
         s = pc.Session()
-        s.opener = FakeOpener([
-            _http_error(429), _http_error(429), _http_error(429),
-            FakeResponse(raw=b"ok"),
-        ])
+        s.opener = FakeOpener(
+            [
+                _http_error(429),
+                _http_error(429),
+                _http_error(429),
+                FakeResponse(raw=b"ok"),
+            ]
+        )
         s._fetch("https://example.test/", retries=4)
         assert sleeps == [10, 20, 40]
 
@@ -579,18 +644,20 @@ class TestSessionFetch:
     def test_retries_on_urlerror_then_succeeds(self, monkeypatch, capsys):
         monkeypatch.setattr(pc.time, "sleep", lambda s: None)
         s = pc.Session()
-        s.opener = FakeOpener([
-            urllib.error.URLError("temp"),
-            urllib.error.URLError("temp"),
-            FakeResponse(raw=b"ok"),
-        ])
+        s.opener = FakeOpener(
+            [
+                urllib.error.URLError("temp"),
+                urllib.error.URLError("temp"),
+                FakeResponse(raw=b"ok"),
+            ]
+        )
         raw, _ = s._fetch("https://example.test/", retries=4)
         assert raw == b"ok"
         assert len(s.opener.calls) == 3
         out = capsys.readouterr().out
         assert "network error" in out
-        assert "retrying in 10s" in out   # 2**0 * 10
-        assert "retrying in 20s" in out   # 2**1 * 10
+        assert "retrying in 10s" in out  # 2**0 * 10
+        assert "retrying in 20s" in out  # 2**1 * 10
 
     def test_custom_headers_merged(self):
         s = pc.Session()
@@ -618,8 +685,7 @@ class TestSessionFetch:
 
 class TestSenateReportList:
     def test_payload_shape(self):
-        s = FakeSession(text_by_url={
-            pc.SENATE_BASE + "/search/report/data/": '{"data": []}'})
+        s = FakeSession(text_by_url={pc.SENATE_BASE + "/search/report/data/": '{"data": []}'})
         resp = pc.senate_report_list(s, "09/01/2026 00:00:00", "", start=0, length=100)
         assert resp == {"data": []}
         url, data, _headers = s.request_calls[0]
@@ -632,11 +698,11 @@ class TestSenateReportList:
 
 # ---------------------------------------------------------------- senate session
 
+
 class TestSenateSession:
     def test_home_then_agreement_post(self, monkeypatch):
         home = pc.SENATE_BASE + "/search/home/"
-        fake = FakeSession(text_by_url={
-            home: '<input name="csrfmiddlewaretoken" value="tok123"/>'})
+        fake = FakeSession(text_by_url={home: '<input name="csrfmiddlewaretoken" value="tok123"/>'})
         monkeypatch.setattr(pc, "Session", lambda: fake)
         s = pc.senate_session()
         assert s is fake
@@ -645,17 +711,19 @@ class TestSenateSession:
         assert fake.request_calls[0][1] is None
         assert fake.request_calls[1][0] == home
         assert fake.request_calls[1][1] == {
-            "csrfmiddlewaretoken": "tok123", "prohibition_agreement": "1"}
+            "csrfmiddlewaretoken": "tok123",
+            "prohibition_agreement": "1",
+        }
 
     def test_missing_csrf_raises(self, monkeypatch):
-        fake = FakeSession(text_by_url={
-            pc.SENATE_BASE + "/search/home/": "<html>no token</html>"})
+        fake = FakeSession(text_by_url={pc.SENATE_BASE + "/search/home/": "<html>no token</html>"})
         monkeypatch.setattr(pc, "Session", lambda: fake)
         with pytest.raises(RuntimeError):
             pc.senate_session()
 
 
 # ---------------------------------------------------------------- house PTR PDF seam
+
 
 class FakePdfPage:
     def __init__(self, text=None):
@@ -699,9 +767,12 @@ class TestHousePtrTrades:
 
     def test_delegates_to_parser_on_text(self, monkeypatch):
         monkeypatch.setattr(
-            pc.pdfplumber, "open",
-            lambda *a, **k: FakePdf([FakePdfPage(
-                "SP Apple Inc. (AAPL) [ST] P 09/01/2026 09/05/2026 $1,001 - $15,000")]))
+            pc.pdfplumber,
+            "open",
+            lambda *a, **k: FakePdf(
+                [FakePdfPage("SP Apple Inc. (AAPL) [ST] P 09/01/2026 09/05/2026 $1,001 - $15,000")]
+            ),
+        )
         s = FakeSession(bytes_by_url={"https://pdf/1.pdf": b"%PDF-fake"})
         trades = pc.house_ptr_trades(s, "https://pdf/1.pdf")
         assert len(trades) == 1
@@ -710,9 +781,11 @@ class TestHousePtrTrades:
 
 # ---------------------------------------------------------------- house PTR OCR
 
+
 def _minimal_ptr_pdf():
     """Build a 1-page text-only PDF in memory (valid xref) for render tests."""
     import io
+
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
@@ -733,14 +806,16 @@ def _minimal_ptr_pdf():
     out.write(b"0000000000 65535 f \n")
     for off in offsets:
         out.write(f"{off:010d} 00000 n \n".encode())
-    out.write(f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
-              f"startxref\n{xref}\n%%EOF\n".encode())
+    out.write(
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+    )
     return out.getvalue()
 
 
 def _synthetic_form(vfracs, hfracs, width=1696, height=2200):
     """Build a PIL grayscale image of the standard PTR form's gridlines."""
     from PIL import Image, ImageDraw
+
     img = Image.new("L", (width, height), 255)
     d = ImageDraw.Draw(img)
     if vfracs:
@@ -757,6 +832,7 @@ def _synthetic_form(vfracs, hfracs, width=1696, height=2200):
 def _draw_x(img, box, band):
     """Draw an X checkbox mark inside box spanning band (y0, y1)."""
     from PIL import ImageDraw
+
     d = ImageDraw.Draw(img)
     x0, y0, x1, y1 = box[0], band[0], box[1], band[1]
     d.line([(x0, y0), (x1, y1)], fill=0, width=3)
@@ -785,9 +861,9 @@ class TestHousePtrOcr:
 
     def test_normalize_ocr_date_truncated_year(self):
         # a 1-digit year is padded from the filing year when it matches
-        assert pc._normalize_ocr_date("11/04/5") == "11/04/2025"   # last digit of 2025
-        assert pc._normalize_ocr_date("11/04/2") == "11/04/2025"   # leading '2' pads fully
-        assert pc._normalize_ocr_date("11/04/3") is None           # no match for '3'
+        assert pc._normalize_ocr_date("11/04/5") == "11/04/2025"  # last digit of 2025
+        assert pc._normalize_ocr_date("11/04/2") == "11/04/2025"  # leading '2' pads fully
+        assert pc._normalize_ocr_date("11/04/3") is None  # no match for '3'
 
     def test_pick_checked_clear_winner(self):
         idx, ok = pc._pick_checked([0.0, 0.9, 0.1])
@@ -811,7 +887,7 @@ class TestHousePtrOcr:
         assert pc._ocr_owner("JT") == "Joint"
         assert pc._ocr_owner("") == "Self"
         assert pc._ocr_owner("john") == "Self"
-        assert pc._ocr_owner("OS") == "Self"   # not a prefix match
+        assert pc._ocr_owner("OS") == "Self"  # not a prefix match
 
     def test_amount_ranges_are_twelve(self):
         assert len(pc.PTR_AMOUNT_RANGES) == 12
@@ -821,6 +897,7 @@ class TestHousePtrOcr:
 
     def test_box_score_detects_x_mark(self):
         from PIL import Image, ImageDraw
+
         img = Image.new("L", (60, 60), 255)
         d = ImageDraw.Draw(img)
         # empty box frame
@@ -836,15 +913,15 @@ class TestHousePtrOcr:
     @pytest.mark.skipif(not pc._tess_available(), reason="tesseract not installed")
     def test_ocr_cell_strips_rule_line(self):
         from PIL import Image, ImageDraw, ImageFont
+
         img = Image.new("L", (300, 60), 255)
         d = ImageDraw.Draw(img)
         try:
-            font = ImageFont.truetype(
-                "/System/Library/Fonts/Supplemental/Arial Bold.ttf", 24)
+            font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 24)
         except OSError:
             font = ImageFont.load_default()
         d.text((10, 15), "HELLO", fill=0, font=font)
-        d.line((0, 0, 0, 60), fill=0, width=3)   # gridline bleed
+        d.line((0, 0, 0, 60), fill=0, width=3)  # gridline bleed
         out = pc._ocr_cell(img, (0, 0, 300, 60))
         assert out == "HELLO"
 
@@ -872,9 +949,8 @@ class TestHousePtrOcr:
     def test_no_text_layer_delegates_to_ocr(self, monkeypatch):
         def fake_ocr(raw, pdf_url):
             return [{"source": "ocr", "confidence": "medium", "asset_name": "X"}]
-        monkeypatch.setattr(
-            pc.pdfplumber, "open",
-            lambda *a, **k: FakePdf([FakePdfPage(None)]))
+
+        monkeypatch.setattr(pc.pdfplumber, "open", lambda *a, **k: FakePdf([FakePdfPage(None)]))
         monkeypatch.setattr(pc, "house_ptr_trades_ocr", fake_ocr)
         s = FakeSession(bytes_by_url={"https://pdf/1.pdf": b"%PDF-fake"})
         trades = pc.house_ptr_trades(s, "https://pdf/1.pdf")
@@ -892,13 +968,13 @@ class TestHousePtrOcr:
         assert len(pages) == 1
         img6, img12 = pages[0]
         assert img6.mode == "L" and img12.mode == "L"
-        assert img6.size == (3672, 4752)    # 612x792 @ scale 6
-        assert img12.size == (7344, 9504)   # 612x792 @ scale 12
+        assert img6.size == (3672, 4752)  # 612x792 @ scale 6
+        assert img12.size == (7344, 9504)  # 612x792 @ scale 12
 
     def test_detect_gridlines_vertical(self):
         img = Image.new("L", (200, 200), 255)
         d = ImageDraw.Draw(img)
-        for x in (50, 100, 199):      # 199 = last column (trailing branch)
+        for x in (50, 100, 199):  # 199 = last column (trailing branch)
             d.line([(x, 110), (x, 160)], fill=0, width=1)
         assert pc._detect_gridlines(img, vertical=True) == [50.0, 100.0, 199.0]
 
@@ -910,8 +986,9 @@ class TestHousePtrOcr:
         assert pc._detect_gridlines(img, vertical=False) == [60.0, 120.0]
 
     def test_ptr_layout_standard_form(self):
-        img = _synthetic_form(pc._PTR_COL_FRACS,
-                              [0.614, 0.6305, 0.6568, 0.6827, 0.7082, 0.7341, 0.76])
+        img = _synthetic_form(
+            pc._PTR_COL_FRACS, [0.614, 0.6305, 0.6568, 0.6827, 0.7082, 0.7341, 0.76]
+        )
         cols, bands, ok = pc._ptr_layout(img)
         assert len(cols) == 20
         assert len(bands) == 6
@@ -922,13 +999,15 @@ class TestHousePtrOcr:
         img = Image.new("L", (1696, 2200), 255)
         cols, bands, ok = pc._ptr_layout(img)
         assert len(cols) == 20
-        assert len(bands) == 4          # 5 row-fracs -> 4 bands
+        assert len(bands) == 4  # 5 row-fracs -> 4 bands
         assert ok is False
 
     def test_ptr_layout_too_many_gridlines_flags(self):
         # 755: vline count far from the expected 21 -> structural_ok False
-        img = _synthetic_form([i / 25 for i in range(26)],  # 26 vlines
-                              [0.614, 0.6305, 0.6568, 0.6827, 0.7082, 0.7341, 0.76])
+        img = _synthetic_form(
+            [i / 25 for i in range(26)],  # 26 vlines
+            [0.614, 0.6305, 0.6568, 0.6827, 0.7082, 0.7341, 0.76],
+        )
         _, _, ok = pc._ptr_layout(img)
         assert ok is False
 
@@ -936,21 +1015,21 @@ class TestHousePtrOcr:
         # 756-765: right count but badly placed vlines -> mean error > 3% -> False
         img = Image.new("L", (1696, 2200), 255)
         w = img.width
-        expected = [pc._PTR_COL_FRACS[i] * w
-                    for i in range(1, len(pc._PTR_COL_FRACS) - 1)]
+        expected = [pc._PTR_COL_FRACS[i] * w for i in range(1, len(pc._PTR_COL_FRACS) - 1)]
         # 21 vlines crowded on the left third: most expected positions have no
         # nearby line, so mean position error blows past the 3% threshold.
         vlines = [100 + i * (500 - 100) / 20 for i in range(21)]
         assert sum(min(abs(v - ex) for v in vlines) for ex in expected) / len(expected) / w > 0.03
-        monkeypatch.setattr(pc, "_detect_gridlines",
-                            lambda img, vertical=True: vlines if vertical else [])
+        monkeypatch.setattr(
+            pc, "_detect_gridlines", lambda img, vertical=True: vlines if vertical else []
+        )
         _, _, ok = pc._ptr_layout(img)
         assert ok is False
 
     def test_ocr_cell_tiny_crop_returns_empty(self):
         img = Image.new("L", (20, 20), 255)
-        assert pc._ocr_cell(img, (0, 0, 3, 10)) == ""   # too narrow
-        assert pc._ocr_cell(img, (0, 0, 10, 3)) == ""   # too short
+        assert pc._ocr_cell(img, (0, 0, 3, 10)) == ""  # too narrow
+        assert pc._ocr_cell(img, (0, 0, 10, 3)) == ""  # too short
 
     def test_ocr_date_cell_blank_returns_empty(self):
         # No dark pixels anywhere: SC12 pass and SC6 fallback both bail out.
@@ -963,7 +1042,7 @@ class TestHousePtrOcr:
         # Images are sized for SC6/SC12 coords (box/y0/y1 scale x3).
         img6 = Image.new("L", (300, 300), 255)
         for x in range(10, 200):
-            img6.putpixel((x, 280), 0)      # below the band (y1_6 = 90)
+            img6.putpixel((x, 280), 0)  # below the band (y1_6 = 90)
         img12 = Image.new("L", (600, 600), 255)
         assert pc._ocr_date_cell(img6, img12, (10, 90), 10, 30) == ""
 
@@ -973,8 +1052,9 @@ class TestHousePtrOcr:
         assert pc._box_score(img, 0, 0, 15, 15) == 0.0
 
     def test_house_ptr_trades_ocr_full_loop(self, monkeypatch, capsys):
-        img = _synthetic_form(pc._PTR_COL_FRACS,
-                              [0.614, 0.6305, 0.6568, 0.6827, 0.7082, 0.7341, 0.76])
+        img = _synthetic_form(
+            pc._PTR_COL_FRACS, [0.614, 0.6305, 0.6568, 0.6827, 0.7082, 0.7341, 0.76]
+        )
         cols, bands, ok = pc._ptr_layout(img)
         assert ok is True
         # band0: valid trade (S + amount idx1 + full text) -> high
@@ -1013,7 +1093,7 @@ class TestHousePtrOcr:
             (bands[4][0], cols[6][0]): "07/30/2026",
             (bands[4][0], cols[7][0]): "08/19/2026",
             (bands[5][0], cols[2][0]): "Netflix",
-            (bands[5][0], cols[1][0]): "nflx",   # lowercase: ticker regex rejects -> None
+            (bands[5][0], cols[1][0]): "nflx",  # lowercase: ticker regex rejects -> None
             (bands[5][0], cols[0][0]): "SP",
             (bands[5][0], cols[6][0]): "junk",
             (bands[5][0], cols[7][0]): "08/19/2026",
@@ -1042,8 +1122,9 @@ class TestHousePtrOcr:
         assert capsys.readouterr().out == ""  # no low-confidence prints
 
     def test_house_ptr_trades_ocr_low_confidence_structural(self, monkeypatch, capsys):
-        img = _synthetic_form(pc._PTR_COL_FRACS,
-                              [0.614, 0.6305, 0.6568, 0.6827, 0.7082, 0.7341, 0.76])
+        img = _synthetic_form(
+            pc._PTR_COL_FRACS, [0.614, 0.6305, 0.6568, 0.6827, 0.7082, 0.7341, 0.76]
+        )
         cols, bands, _ = pc._ptr_layout(img)
         _draw_x(img, cols[4], bands[0])
         _draw_x(img, cols[9], bands[0])
@@ -1087,8 +1168,9 @@ class TestHousePtrOcr:
     def test_house_ptr_trades_ocr_garbage_row_skipped(self, monkeypatch):
         # A fully-marked row whose asset text is an instruction line
         # ("ASSET NAME" header garbage) must be dropped, not parsed as a trade.
-        img = _synthetic_form(pc._PTR_COL_FRACS,
-                              [0.614, 0.6305, 0.6568, 0.6827, 0.7082, 0.7341, 0.76])
+        img = _synthetic_form(
+            pc._PTR_COL_FRACS, [0.614, 0.6305, 0.6568, 0.6827, 0.7082, 0.7341, 0.76]
+        )
         cols, bands, ok = pc._ptr_layout(img)
         assert ok is True
         _draw_x(img, cols[4], bands[0])
@@ -1109,6 +1191,7 @@ class TestHousePtrOcr:
 
 
 # ---------------------------------------------------------------- db: migrations
+
 
 class TestRunMigrations:
     def test_applies_in_order_and_tracks(self, monkeypatch, tmp_path):
@@ -1173,6 +1256,7 @@ class TestRunMigrations:
 
 # ---------------------------------------------------------------- staleness
 
+
 class TestStaleSources:
     """Staleness is measured on *parsed* filings, not on filing rows.
 
@@ -1194,8 +1278,9 @@ class TestStaleSources:
         assert pc.stale_sources(FakeConn(cursors=[cur]), 10) == [("senate", old)]
 
     def test_fresh_sources_pass(self):
-        cur = FakeCursor(fetchall_result=[
-            ("senate", date.today() - timedelta(days=2)), ("house", date.today())])
+        cur = FakeCursor(
+            fetchall_result=[("senate", date.today() - timedelta(days=2)), ("house", date.today())]
+        )
         assert pc.stale_sources(FakeConn(cursors=[cur]), 10) == []
 
     def test_source_missing_from_results_is_stale(self):
@@ -1207,8 +1292,7 @@ class TestStaleSources:
     def test_source_with_only_unparsed_filings_is_stale(self):
         # New filing rows, zero trades parsed: the outage this catches.
         cur = FakeCursor(fetchall_result=[("senate", None), ("house", None)])
-        assert pc.stale_sources(FakeConn(cursors=[cur]), 10) == [
-            ("senate", None), ("house", None)]
+        assert pc.stale_sources(FakeConn(cursors=[cur]), 10) == [("senate", None), ("house", None)]
 
     def test_window_is_configurable(self):
         four_days = date.today() - timedelta(days=4)
@@ -1219,6 +1303,7 @@ class TestStaleSources:
 
 
 # ---------------------------------------------------------------- run_senate
+
 
 class TestRunSenate:
     def test_empty_page_breaks(self, monkeypatch):
@@ -1231,28 +1316,52 @@ class TestRunSenate:
 
     def test_row_without_link_skipped(self, monkeypatch):
         data_url = pc.SENATE_BASE + "/search/report/data/"
-        fake = FakeSession(text_by_url={
-            data_url: json.dumps({"data": [
-                ["John", "Smith", "CA", "", "09/01/2026"],
-                ["Jane", "Doe", "NY", '<a href="/search/view/ptr/xyz/">View PTR</a>',
-                 "09/02/2026"],
-            ]})})
+        fake = FakeSession(
+            text_by_url={
+                data_url: json.dumps(
+                    {
+                        "data": [
+                            ["John", "Smith", "CA", "", "09/01/2026"],
+                            [
+                                "Jane",
+                                "Doe",
+                                "NY",
+                                '<a href="/search/view/ptr/xyz/">View PTR</a>',
+                                "09/02/2026",
+                            ],
+                        ]
+                    }
+                )
+            }
+        )
         monkeypatch.setattr(pc, "senate_session", lambda: fake)
         monkeypatch.setattr(pc.time, "sleep", lambda s: None)
         conn = FakeConn(cursors=[FakeCursor(fetchone_result=(True,))])
         nf, nt = pc.run_senate(conn, start=date(2026, 9, 1), end=date(2026, 9, 1))
-        assert nf == 1      # only the row with a link is counted
-        assert nt == 0      # xyz is a PTR with an empty table -> no trades
+        assert nf == 1  # only the row with a link is counted
+        assert nt == 0  # xyz is a PTR with an empty table -> no trades
 
     def test_new_filing_pulls_trades(self, monkeypatch):
         data_url = pc.SENATE_BASE + "/search/report/data/"
         ptr_url = pc.SENATE_BASE + "/search/view/ptr/abc/"
-        fake = FakeSession(text_by_url={
-            data_url: json.dumps({"data": [[
-                "John", "Smith", "CA", '<a href="/search/view/ptr/abc/">View PTR</a>',
-                "09/01/2026"]]}),
-            ptr_url: SENATE_HTML,
-        })
+        fake = FakeSession(
+            text_by_url={
+                data_url: json.dumps(
+                    {
+                        "data": [
+                            [
+                                "John",
+                                "Smith",
+                                "CA",
+                                '<a href="/search/view/ptr/abc/">View PTR</a>',
+                                "09/01/2026",
+                            ]
+                        ]
+                    }
+                ),
+                ptr_url: SENATE_HTML,
+            }
+        )
         monkeypatch.setattr(pc, "senate_session", lambda: fake)
         monkeypatch.setattr(pc.time, "sleep", lambda s: None)
         cur_upsert = FakeCursor(fetchone_result=(True,))
@@ -1278,12 +1387,24 @@ class TestRunSenate:
     <td>Government Security</td><td>Purchase</td><td>$1,001 - $15,000</td><td></td></tr>
 </table></body></html>
 """
-        fake = FakeSession(text_by_url={
-            data_url: json.dumps({"data": [[
-                "John", "Smith", "CA", '<a href="/search/view/ptr/abc/">View PTR</a>',
-                "09/01/2026"]]}),
-            ptr_url: dash_html,
-        })
+        fake = FakeSession(
+            text_by_url={
+                data_url: json.dumps(
+                    {
+                        "data": [
+                            [
+                                "John",
+                                "Smith",
+                                "CA",
+                                '<a href="/search/view/ptr/abc/">View PTR</a>',
+                                "09/01/2026",
+                            ]
+                        ]
+                    }
+                ),
+                ptr_url: dash_html,
+            }
+        )
         monkeypatch.setattr(pc, "senate_session", lambda: fake)
         monkeypatch.setattr(pc.time, "sleep", lambda s: None)
         cur_upsert = FakeCursor(fetchone_result=(True,))
@@ -1297,10 +1418,23 @@ class TestRunSenate:
 
     def test_known_filing_skipped(self, monkeypatch):
         data_url = pc.SENATE_BASE + "/search/report/data/"
-        fake = FakeSession(text_by_url={
-            data_url: json.dumps({"data": [[
-                "John", "Smith", "CA", '<a href="/search/view/ptr/abc/">View PTR</a>',
-                "09/01/2026"]]})})
+        fake = FakeSession(
+            text_by_url={
+                data_url: json.dumps(
+                    {
+                        "data": [
+                            [
+                                "John",
+                                "Smith",
+                                "CA",
+                                '<a href="/search/view/ptr/abc/">View PTR</a>',
+                                "09/01/2026",
+                            ]
+                        ]
+                    }
+                )
+            }
+        )
         monkeypatch.setattr(pc, "senate_session", lambda: fake)
         monkeypatch.setattr(pc.time, "sleep", lambda s: None)
         cur_upsert = FakeCursor(fetchone_result=(False,))  # already in DB
@@ -1312,12 +1446,24 @@ class TestRunSenate:
 
     def test_paper_filing_logged(self, monkeypatch, capsys):
         data_url = pc.SENATE_BASE + "/search/report/data/"
-        fake = FakeSession(text_by_url={
-            data_url: json.dumps({"data": [[
-                "John", "Smith", "CA", '<a href="/search/view/paper/xyz/">View PTR</a>',
-                "09/01/2026"]]}),
-            pc.SENATE_BASE + "/search/view/ptr/xyz/": "<html>no table</html>",
-        })
+        fake = FakeSession(
+            text_by_url={
+                data_url: json.dumps(
+                    {
+                        "data": [
+                            [
+                                "John",
+                                "Smith",
+                                "CA",
+                                '<a href="/search/view/paper/xyz/">View PTR</a>',
+                                "09/01/2026",
+                            ]
+                        ]
+                    }
+                ),
+                pc.SENATE_BASE + "/search/view/ptr/xyz/": "<html>no table</html>",
+            }
+        )
         monkeypatch.setattr(pc, "senate_session", lambda: fake)
         monkeypatch.setattr(pc.time, "sleep", lambda s: None)
         conn = FakeConn(cursors=[FakeCursor(fetchone_result=(True,))])
@@ -1327,9 +1473,7 @@ class TestRunSenate:
         assert "paper filing" in capsys.readouterr().out
 
     def test_pagination_loops_until_short_page(self, monkeypatch):
-        data_url = pc.SENATE_BASE + "/search/report/data/"
-        row = ["John", "Smith", "CA", '<a href="/search/view/ptr/abc/">View PTR</a>',
-               "09/01/2026"]
+        row = ["John", "Smith", "CA", '<a href="/search/view/ptr/abc/">View PTR</a>', "09/01/2026"]
 
         def fake_request(url, data=None, headers=None, retries=4):
             payload = data or {}
@@ -1349,6 +1493,7 @@ class TestRunSenate:
 
 # ---------------------------------------------------------------- run_house
 
+
 class TestRunHouse:
     def test_default_years_and_trade_insert(self, monkeypatch):
         xml = """<?xml version="1.0"?>
@@ -1357,18 +1502,23 @@ class TestRunHouse:
     <FilingDate>09/01/2026</FilingDate><DocID>111</DocID></Member>
 </Members>
 """
-        fake = FakeSession(bytes_by_url={
-            pc.HOUSE_PUBLIC + "/financial-pdfs/2026FD.zip": make_fd_zip(2026, xml),
-            pc.HOUSE_PUBLIC + "/financial-pdfs/2025FD.zip": make_fd_zip(2025, xml),
-            pc.HOUSE_PUBLIC + "/ptr-pdfs/2026/111.pdf": b"%PDF-fake",
-            pc.HOUSE_PUBLIC + "/ptr-pdfs/2025/111.pdf": b"%PDF-fake",
-        })
+        fake = FakeSession(
+            bytes_by_url={
+                pc.HOUSE_PUBLIC + "/financial-pdfs/2026FD.zip": make_fd_zip(2026, xml),
+                pc.HOUSE_PUBLIC + "/financial-pdfs/2025FD.zip": make_fd_zip(2025, xml),
+                pc.HOUSE_PUBLIC + "/ptr-pdfs/2026/111.pdf": b"%PDF-fake",
+                pc.HOUSE_PUBLIC + "/ptr-pdfs/2025/111.pdf": b"%PDF-fake",
+            }
+        )
         monkeypatch.setattr(pc, "Session", lambda: fake)
         monkeypatch.setattr(pc.time, "sleep", lambda s: None)
         monkeypatch.setattr(
-            pc.pdfplumber, "open",
-            lambda *a, **k: FakePdf([FakePdfPage(
-                "SP Apple Inc. (AAPL) [ST] P 09/01/2026 09/05/2026 $1,001 - $15,000")]))
+            pc.pdfplumber,
+            "open",
+            lambda *a, **k: FakePdf(
+                [FakePdfPage("SP Apple Inc. (AAPL) [ST] P 09/01/2026 09/05/2026 $1,001 - $15,000")]
+            ),
+        )
 
         class _FakeDate:
             @staticmethod
@@ -1378,8 +1528,8 @@ class TestRunHouse:
         monkeypatch.setattr(pc, "date", _FakeDate)
         conn = FakeConn()  # auto-cursors; upsert always True
         nf, nt = pc.run_house(conn)
-        assert nf == 2     # one PTR filing per year
-        assert nt == 2     # one parsed trade per PTR PDF
+        assert nf == 2  # one PTR filing per year
+        assert nt == 2  # one parsed trade per PTR PDF
         assert len(fake.request_bytes_calls) == 4  # 2 zips + 2 PDFs
 
     def test_index_and_ptr_pdf_pull(self, monkeypatch):
@@ -1394,10 +1544,12 @@ class TestRunHouse:
 """
         zip_url = pc.HOUSE_PUBLIC + f"/financial-pdfs/{year}FD.zip"
         pdf_url = pc.HOUSE_PUBLIC + f"/ptr-pdfs/{year}/111.pdf"
-        fake = FakeSession(bytes_by_url={
-            zip_url: make_fd_zip(year, xml),
-            pdf_url: b"not a pdf",  # parse failure -> no trades, but filing still indexed
-        })
+        fake = FakeSession(
+            bytes_by_url={
+                zip_url: make_fd_zip(year, xml),
+                pdf_url: b"not a pdf",  # parse failure -> no trades, but filing still indexed
+            }
+        )
         monkeypatch.setattr(pc, "Session", lambda: fake)
         monkeypatch.setattr(pc.time, "sleep", lambda s: None)
 
@@ -1427,7 +1579,7 @@ class TestRunHouse:
         cur_done = FakeCursor(fetchall_result=[("house:111",)])
         conn = FakeConn(cursors=[cur_done])
         nf, nt = pc.run_house(conn, years=[year])
-        assert nf == 1   # filing still upserted
+        assert nf == 1  # filing still upserted
         assert nt == 0
         assert len(fake.request_bytes_calls) == 1  # zip only, no PDF fetch
 
@@ -1441,16 +1593,21 @@ class TestRunHouse:
 """
         zip_url = pc.HOUSE_PUBLIC + f"/financial-pdfs/{year}FD.zip"
         pdf_url = pc.HOUSE_PUBLIC + f"/ptr-pdfs/{year}/111.pdf"
-        fake = FakeSession(bytes_by_url={
-            zip_url: make_fd_zip(year, xml),
-            pdf_url: b"%PDF-fake",
-        })
+        fake = FakeSession(
+            bytes_by_url={
+                zip_url: make_fd_zip(year, xml),
+                pdf_url: b"%PDF-fake",
+            }
+        )
         monkeypatch.setattr(pc, "Session", lambda: fake)
         monkeypatch.setattr(pc.time, "sleep", lambda s: None)
         monkeypatch.setattr(
-            pc.pdfplumber, "open",
-            lambda *a, **k: FakePdf([FakePdfPage(
-                "SP Apple Inc. (AAPL) [ST] P 09/01/2026 09/05/2026 $1,001 - $15,000")]))
+            pc.pdfplumber,
+            "open",
+            lambda *a, **k: FakePdf(
+                [FakePdfPage("SP Apple Inc. (AAPL) [ST] P 09/01/2026 09/05/2026 $1,001 - $15,000")]
+            ),
+        )
 
         # Trades already exist, so a plain run would skip the PDF. refresh=True
         # must clear the attempt counters, ignore `done`, re-fetch the PDF,
@@ -1464,8 +1621,7 @@ class TestRunHouse:
         assert nt == 1
         assert fake.request_bytes_calls == [zip_url, pdf_url]  # PDF re-fetched
         assert any("SET parse_attempts = 0" in c[0] for c in cur_reset.calls)
-        deletes = [c for c in cur_trades.calls
-                   if c[0] == "DELETE FROM trades WHERE filing_id = %s"]
+        deletes = [c for c in cur_trades.calls if c[0] == "DELETE FROM trades WHERE filing_id = %s"]
         assert deletes == [("DELETE FROM trades WHERE filing_id = %s", ("house:111",))]
 
     def test_zero_trade_ptr_is_counted_and_not_refetched(self, monkeypatch, capsys):
@@ -1483,15 +1639,15 @@ class TestRunHouse:
 """
         zip_url = pc.HOUSE_PUBLIC + f"/financial-pdfs/{year}FD.zip"
         pdf_url = pc.HOUSE_PUBLIC + f"/ptr-pdfs/{year}/111.pdf"
-        fake = FakeSession(bytes_by_url={zip_url: make_fd_zip(year, xml),
-                                         pdf_url: b"%PDF-fake"})
+        fake = FakeSession(bytes_by_url={zip_url: make_fd_zip(year, xml), pdf_url: b"%PDF-fake"})
         monkeypatch.setattr(pc, "Session", lambda: fake)
         monkeypatch.setattr(pc.time, "sleep", lambda s: None)
         # Unparseable text layer: no trades, so the filing stays unparsed.
-        monkeypatch.setattr(pc.pdfplumber, "open",
-                            lambda *a, **k: FakePdf([FakePdfPage("nothing here")]))
+        monkeypatch.setattr(
+            pc.pdfplumber, "open", lambda *a, **k: FakePdf([FakePdfPage("nothing here")])
+        )
 
-        cur_done = FakeCursor(fetchall_result=[])     # neither parsed nor given up
+        cur_done = FakeCursor(fetchall_result=[])  # neither parsed nor given up
         cur_up = FakeCursor(fetchone_result=(True,))
         cur_count = FakeCursor(fetchone_result=(1,))  # first attempt
         conn = FakeConn(cursors=[cur_done, cur_up, cur_count])
@@ -1522,7 +1678,7 @@ class TestRunHouse:
         conn = FakeConn(cursors=[cur_skip, cur_up])
         nf, nt = pc.run_house(conn, years=[year])
         assert (nf, nt) == (1, 0)
-        assert fake.request_bytes_calls == [zip_url]   # no PDF fetch
+        assert fake.request_bytes_calls == [zip_url]  # no PDF fetch
 
     def test_skip_query_honours_attempt_cap(self, monkeypatch):
         year = 2026
@@ -1555,12 +1711,12 @@ class TestRunHouse:
 """
         zip_url = pc.HOUSE_PUBLIC + f"/financial-pdfs/{year}FD.zip"
         pdf_url = pc.HOUSE_PUBLIC + f"/ptr-pdfs/{year}/111.pdf"
-        fake = FakeSession(bytes_by_url={zip_url: make_fd_zip(year, xml),
-                                         pdf_url: b"%PDF-fake"})
+        fake = FakeSession(bytes_by_url={zip_url: make_fd_zip(year, xml), pdf_url: b"%PDF-fake"})
         monkeypatch.setattr(pc, "Session", lambda: fake)
         monkeypatch.setattr(pc.time, "sleep", lambda s: None)
-        monkeypatch.setattr(pc.pdfplumber, "open",
-                            lambda *a, **k: FakePdf([FakePdfPage("nothing here")]))
+        monkeypatch.setattr(
+            pc.pdfplumber, "open", lambda *a, **k: FakePdf([FakePdfPage("nothing here")])
+        )
         monkeypatch.setattr(pc, "PTR_MAX_ATTEMPTS", 3)
 
         cur_done = FakeCursor(fetchall_result=[])
@@ -1583,12 +1739,26 @@ class TestRunHouse:
         monkeypatch.setattr(pc, "Session", lambda: fake)
         monkeypatch.setattr(pc.time, "sleep", lambda s: None)
 
-        low = {"owner": "Spouse", "ticker": "MSFT", "asset_name": "Microsoft",
-               "type": "Sale", "amount": "$1,001 - $15,000", "txn_date": "07/30/2026",
-               "source": "ocr", "confidence": "low"}
-        high = {"owner": "Spouse", "ticker": "AAPL", "asset_name": "Apple",
-                "type": "Purchase", "amount": "$15,001 - $50,000", "txn_date": "08/01/2026",
-                "source": "ocr", "confidence": "high"}
+        low = {
+            "owner": "Spouse",
+            "ticker": "MSFT",
+            "asset_name": "Microsoft",
+            "type": "Sale",
+            "amount": "$1,001 - $15,000",
+            "txn_date": "07/30/2026",
+            "source": "ocr",
+            "confidence": "low",
+        }
+        high = {
+            "owner": "Spouse",
+            "ticker": "AAPL",
+            "asset_name": "Apple",
+            "type": "Purchase",
+            "amount": "$15,001 - $50,000",
+            "txn_date": "08/01/2026",
+            "source": "ocr",
+            "confidence": "high",
+        }
         monkeypatch.setattr(pc, "house_ptr_trades", lambda s, url: [low, high])
 
         cur_done = FakeCursor(fetchall_result=[])
@@ -1597,16 +1767,16 @@ class TestRunHouse:
         conn = FakeConn(cursors=[cur_done, cur_upsert, cur_trades])
         nf, nt = pc.run_house(conn, years=[year])
         assert nf == 1
-        assert nt == 1   # only the high-confidence row is ingested
+        assert nt == 1  # only the high-confidence row is ingested
         out = capsys.readouterr().out
         assert "SKIP low-confidence OCR house:111" in out
-        inserts = [c for c in cur_trades.calls
-                   if c[0].startswith("INSERT INTO trades")]
+        inserts = [c for c in cur_trades.calls if c[0].startswith("INSERT INTO trades")]
         assert len(inserts) == 1
-        assert inserts[0][1][1] == "AAPL"   # filing_id, ticker slot
+        assert inserts[0][1][1] == "AAPL"  # filing_id, ticker slot
 
 
 # ---------------------------------------------------------------- db: db_conn
+
 
 class TestDbConn:
     def test_reads_password_file_and_connects(self, tmp_path, monkeypatch):
@@ -1633,14 +1803,17 @@ class TestDbConn:
 
 # ---------------------------------------------------------------- main
 
+
 class TestMain:
     def test_env_dates_passed(self, monkeypatch, capsys):
         monkeypatch.setattr(pc, "db_conn", lambda: FakeConn())
         monkeypatch.setattr(pc, "run_migrations", lambda conn: None)
         seen = {}
-        monkeypatch.setattr(pc, "run_senate",
-                            lambda conn, start=None, end=None:
-                            seen.update(start=start, end=end) or (0, 0))
+        monkeypatch.setattr(
+            pc,
+            "run_senate",
+            lambda conn, start=None, end=None: seen.update(start=start, end=end) or (0, 0),
+        )
         monkeypatch.setattr(pc, "run_house", lambda conn, refresh=False: (0, 0))
         monkeypatch.setenv("START_DATE", "2026-08-01")
         monkeypatch.setenv("END_DATE", "2026-09-01")
@@ -1653,10 +1826,12 @@ class TestMain:
         monkeypatch.setattr(pc, "db_conn", lambda: FakeConn())
         calls = {}
         monkeypatch.setattr(pc, "run_migrations", lambda conn: calls.setdefault("mig", True))
-        monkeypatch.setattr(pc, "run_senate",
-                            lambda conn, start=None, end=None: calls.setdefault("sen", (1, 2)))
-        monkeypatch.setattr(pc, "run_house",
-                            lambda conn, refresh=False: calls.setdefault("house", (3, 4)))
+        monkeypatch.setattr(
+            pc, "run_senate", lambda conn, start=None, end=None: calls.setdefault("sen", (1, 2))
+        )
+        monkeypatch.setattr(
+            pc, "run_house", lambda conn, refresh=False: calls.setdefault("house", (3, 4))
+        )
         monkeypatch.delenv("START_DATE", raising=False)
         monkeypatch.delenv("END_DATE", raising=False)
         monkeypatch.setattr(pc, "stale_sources", lambda conn: [])
@@ -1671,8 +1846,9 @@ class TestMain:
         monkeypatch.setattr(pc, "run_migrations", lambda conn: None)
         monkeypatch.setattr(pc, "run_senate", lambda conn, start=None, end=None: (0, 0))
         seen = {}
-        monkeypatch.setattr(pc, "run_house",
-                            lambda conn, refresh=False: seen.update(refresh=refresh) or (0, 0))
+        monkeypatch.setattr(
+            pc, "run_house", lambda conn, refresh=False: seen.update(refresh=refresh) or (0, 0)
+        )
         monkeypatch.delenv("START_DATE", raising=False)
         monkeypatch.delenv("END_DATE", raising=False)
         monkeypatch.delenv("REFRESH_HOUSE", raising=False)
@@ -1770,8 +1946,7 @@ class TestMain:
         monkeypatch.setattr(pc, "run_migrations", lambda conn: None)
         monkeypatch.setattr(pc, "run_senate", lambda conn, start=None, end=None: (0, 0))
         monkeypatch.setattr(pc, "run_house", lambda conn, refresh=False: (0, 0))
-        monkeypatch.setattr(pc, "stale_sources",
-                            lambda conn: [("senate", date(2026, 10, 21))])
+        monkeypatch.setattr(pc, "stale_sources", lambda conn: [("senate", date(2026, 10, 21))])
         monkeypatch.delenv("START_DATE", raising=False)
         monkeypatch.delenv("END_DATE", raising=False)
         with pytest.raises(SystemExit) as exc:

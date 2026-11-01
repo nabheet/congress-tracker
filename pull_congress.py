@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Congress stock-trade tracker — pull filings from Senate eFD and House Clerk, upsert into postgres.
+"""Congress stock-trade tracker — Senate eFD and House Clerk filings into postgres.
 
 Sources:
   - Senate: efdsearch.senate.gov (JSON search API + per-filing HTML)
@@ -57,7 +57,10 @@ HOUSE_TYPE_LABELS = {
     "B": "Other",
 }
 
-UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+)
 
 PG_HOST = os.environ.get("PG_HOST", "db")
 PG_PORT = int(os.environ.get("PG_PORT", "5432"))
@@ -81,6 +84,7 @@ PTR_MAX_ATTEMPTS = int(os.environ.get("PTR_MAX_ATTEMPTS", "3"))
 
 # ---------------------------------------------------------------- http helpers
 
+
 class RateLimited(Exception):
     pass
 
@@ -89,8 +93,7 @@ class Session:
     def __init__(self):
         self.cookies = {}
         self._jar = urllib.request.HTTPCookieProcessor().cookiejar
-        self.opener = urllib.request.build_opener(
-            urllib.request.HTTPCookieProcessor(self._jar))
+        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self._jar))
 
     def _sync_cookies(self):
         self.cookies = {c.name: c.value for c in self._jar}
@@ -109,8 +112,12 @@ class Session:
                 body = None
                 if data is not None:
                     body = urllib.parse.urlencode(data).encode()
-                req = urllib.request.Request(url, data=body, headers=req_headers,
-                                             method="POST" if data is not None else "GET")
+                req = urllib.request.Request(
+                    url,
+                    data=body,
+                    headers=req_headers,
+                    method="POST" if data is not None else "GET",
+                )
                 with self.opener.open(req, timeout=60) as resp:
                     raw = resp.read()
                 self._sync_cookies()
@@ -118,14 +125,14 @@ class Session:
             except urllib.error.HTTPError as e:
                 if e.code in (429, 503, 403):
                     last = e
-                    wait = (2 ** attempt) * 10  # 10s, 20s, 40s, 80s
+                    wait = (2**attempt) * 10  # 10s, 20s, 40s, 80s
                     print(f"rate-limit {e.code}; retrying in {wait}s", flush=True)
                     time.sleep(wait)
                     continue
                 raise
             except urllib.error.URLError as e:
                 last = e
-                wait = (2 ** attempt) * 10
+                wait = (2**attempt) * 10
                 print(f"network error {e!r}; retrying in {wait}s", flush=True)
                 time.sleep(wait)
                 continue
@@ -148,6 +155,7 @@ def csrf_from(html_text):
 
 # ---------------------------------------------------------------- senate
 
+
 def senate_session():
     """Reproduce the verified curl flow: home GET -> agreement POST -> data POST."""
     s = Session()
@@ -155,8 +163,10 @@ def senate_session():
     csrf = csrf_from(html_text)
     if not csrf:
         raise RuntimeError("senate: no csrf token on /search/home/")
-    s.request(SENATE_BASE + "/search/home/",
-              data={"csrfmiddlewaretoken": csrf, "prohibition_agreement": "1"})
+    s.request(
+        SENATE_BASE + "/search/home/",
+        data={"csrfmiddlewaretoken": csrf, "prohibition_agreement": "1"},
+    )
     # agreement POST sets sessionid; subsequent requests carry it via cookie jar
     return s
 
@@ -167,29 +177,56 @@ def senate_report_list(s, submitted_start, submitted_end, start=0, length=100):
     """
     payload = {
         "draw": "1",
-        "columns[0][data]": "0", "columns[0][name]": "", "columns[0][searchable]": "true",
-        "columns[0][orderable]": "true", "columns[0][search][value]": "", "columns[0][search][regex]": "false",
-        "columns[1][data]": "1", "columns[1][name]": "", "columns[1][searchable]": "true",
-        "columns[1][orderable]": "true", "columns[1][search][value]": "", "columns[1][search][regex]": "false",
-        "columns[2][data]": "2", "columns[2][name]": "", "columns[2][searchable]": "true",
-        "columns[2][orderable]": "true", "columns[2][search][value]": "", "columns[2][search][regex]": "false",
-        "columns[3][data]": "3", "columns[3][name]": "", "columns[3][searchable]": "true",
-        "columns[3][orderable]": "true", "columns[3][search][value]": "", "columns[3][search][regex]": "false",
-        "columns[4][data]": "4", "columns[4][name]": "", "columns[4][searchable]": "true",
-        "columns[4][orderable]": "true", "columns[4][search][value]": "", "columns[4][search][regex]": "false",
-        "order[0][column]": "1", "order[0][dir]": "asc",
-        "order[1][column]": "0", "order[1][dir]": "asc",
-        "start": str(start), "length": str(length),
-        "search[value]": "", "search[regex]": "false",
-        "report_types": "[11]",           # Inert: the server ignores filer_types/report_types
-        "filer_types": "[1]",             # (verified 2026-09-06: every value, incl. "[4]" candidates /
-                                          # "[5]" former senators, returns identical record counts).
-                                          # "[11]" is the site's own PTR value; both are kept verbatim
-                                          # only because the endpoint rejects payloads that omit them.
-        "submitted_start_date": submitted_start,   # MM/DD/YYYY HH:MM:SS
-        "submitted_end_date": submitted_end,       # empty = no upper bound
-        "candidate_state": "", "senator_state": "", "office_id": "",
-        "first_name": "", "last_name": "",
+        "columns[0][data]": "0",
+        "columns[0][name]": "",
+        "columns[0][searchable]": "true",
+        "columns[0][orderable]": "true",
+        "columns[0][search][value]": "",
+        "columns[0][search][regex]": "false",
+        "columns[1][data]": "1",
+        "columns[1][name]": "",
+        "columns[1][searchable]": "true",
+        "columns[1][orderable]": "true",
+        "columns[1][search][value]": "",
+        "columns[1][search][regex]": "false",
+        "columns[2][data]": "2",
+        "columns[2][name]": "",
+        "columns[2][searchable]": "true",
+        "columns[2][orderable]": "true",
+        "columns[2][search][value]": "",
+        "columns[2][search][regex]": "false",
+        "columns[3][data]": "3",
+        "columns[3][name]": "",
+        "columns[3][searchable]": "true",
+        "columns[3][orderable]": "true",
+        "columns[3][search][value]": "",
+        "columns[3][search][regex]": "false",
+        "columns[4][data]": "4",
+        "columns[4][name]": "",
+        "columns[4][searchable]": "true",
+        "columns[4][orderable]": "true",
+        "columns[4][search][value]": "",
+        "columns[4][search][regex]": "false",
+        "order[0][column]": "1",
+        "order[0][dir]": "asc",
+        "order[1][column]": "0",
+        "order[1][dir]": "asc",
+        "start": str(start),
+        "length": str(length),
+        "search[value]": "",
+        "search[regex]": "false",
+        "report_types": "[11]",  # Inert: the server ignores filer_types/report_types
+        "filer_types": "[1]",  # (verified 2026-09-06: every value, incl. "[4]" candidates /
+        # "[5]" former senators, returns identical record counts).
+        # "[11]" is the site's own PTR value; both are kept verbatim
+        # only because the endpoint rejects payloads that omit them.
+        "submitted_start_date": submitted_start,  # MM/DD/YYYY HH:MM:SS
+        "submitted_end_date": submitted_end,  # empty = no upper bound
+        "candidate_state": "",
+        "senator_state": "",
+        "office_id": "",
+        "first_name": "",
+        "last_name": "",
     }
     headers = {
         "X-CSRFToken": s.cookies.get("csrftoken", ""),
@@ -226,8 +263,10 @@ def senate_trades_from_html(text):
     """
     rows = []
     for m in re.finditer(r"<tr[^>]*>(.*?)</tr>", text, re.S | re.I):
-        cells = [html.unescape(re.sub(r"<[^>]+>", "", c)).strip()
-                 for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", m.group(1), re.S | re.I)]
+        cells = [
+            html.unescape(re.sub(r"<[^>]+>", "", c)).strip()
+            for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", m.group(1), re.S | re.I)
+        ]
         if len(cells) < 9:
             continue
         if cells[0] == "#" or cells[1] == "Transaction Date":
@@ -237,6 +276,7 @@ def senate_trades_from_html(text):
 
 
 # ---------------------------------------------------------------- house
+
 
 def house_filing_index(s, year):
     """Download YYYYFD.zip and return the parsed filing index rows.
@@ -270,16 +310,21 @@ def house_filing_index(s, year):
             except ValueError:
                 filed_date = None
         is_ptr = code == "P"
-        rows.append({
-            "id": f"house:{docid}",
-            "source": "house",
-            "filer": f"{first} {last}".strip(),
-            "report_type": HOUSE_TYPE_LABELS.get(code, code or "Unknown"),
-            "filed_at": filed_date,
-            "raw_url": (HOUSE_PUBLIC + f"/ptr-pdfs/{year}/{docid}.pdf" if is_ptr
-                        else HOUSE_PUBLIC + f"/financial-pdfs/{year}/{docid}.pdf"),
-            "is_ptr": is_ptr,
-        })
+        rows.append(
+            {
+                "id": f"house:{docid}",
+                "source": "house",
+                "filer": f"{first} {last}".strip(),
+                "report_type": HOUSE_TYPE_LABELS.get(code, code or "Unknown"),
+                "filed_at": filed_date,
+                "raw_url": (
+                    HOUSE_PUBLIC + f"/ptr-pdfs/{year}/{docid}.pdf"
+                    if is_ptr
+                    else HOUSE_PUBLIC + f"/financial-pdfs/{year}/{docid}.pdf"
+                ),
+                "is_ptr": is_ptr,
+            }
+        )
     return rows
 
 
@@ -308,9 +353,27 @@ TYPE_LABEL = {"P": "Purchase", "S": "Sale", "X": "Exchange", "E": "Exchange"}
 # "QQQ", "BRK.B" are), which rejects the title-case tails. This set covers the
 # all-caps tails that the case rule alone cannot reject.
 NON_TICKER_WORDS = {
-    "BILLS", "BONDS", "CORP", "ETF", "FUND", "INC", "LLC", "LP",
-    "NOTES", "STOCK", "TRUST", "UNITS", "CLASS", "WTS", "SHRS",
-    "DEP", "REIT", "ADR", "GDR", "CEF", "MF",
+    "BILLS",
+    "BONDS",
+    "CORP",
+    "ETF",
+    "FUND",
+    "INC",
+    "LLC",
+    "LP",
+    "NOTES",
+    "STOCK",
+    "TRUST",
+    "UNITS",
+    "CLASS",
+    "WTS",
+    "SHRS",
+    "DEP",
+    "REIT",
+    "ADR",
+    "GDR",
+    "CEF",
+    "MF",
 }
 BOUNDARY_RE = re.compile(
     r"^(Filing ID|Name:|Status:|State/District:|ID Owner|Type Date|\$200\?|"
@@ -355,11 +418,11 @@ def house_trades_from_text(text):
     if not text.strip():
         return []
     lines = []
-    for l in text.splitlines():
-        l = re.sub(r"[\x00-\x1f]", "", l)   # NUL-padded letter-spaced labels
-        l = re.sub(r"\s+", " ", l).strip()
-        if l:
-            lines.append(l)
+    for raw in text.splitlines():
+        line = re.sub(r"[\x00-\x1f]", "", raw)  # NUL-padded letter-spaced labels
+        line = re.sub(r"\s+", " ", line).strip()
+        if line:
+            lines.append(line)
 
     trades = []
     i = 0
@@ -390,7 +453,7 @@ def house_trades_from_text(text):
         # "Stock (STT) [ST] $50,000"). Consume the continuation, keeping any
         # asset text that rides along with the second amount.
         j = i + 1
-        tail = lines[i][m.end():].strip()
+        tail = lines[i][m.end() :].strip()
         if amt2 is None and tail.endswith("-"):
             while j < n:
                 am = AMOUNT_RE.search(lines[j])
@@ -407,7 +470,8 @@ def house_trades_from_text(text):
         om = OWNER_PREFIX_RE.match(prefix)
         if om:
             owner = {"SP": "Spouse", "JT": "Joint", "SELF": "Self"}.get(
-                om.group(1).upper(), om.group(1))
+                om.group(1).upper(), om.group(1)
+            )
             prefix = om.group(2).strip()
         k = i + 1
         while k < n and k <= i + 6:
@@ -448,7 +512,7 @@ def house_trades_from_text(text):
             if TXN_RE.search(lk) or BOUNDARY_RE.search(lk):
                 break
             if lk.startswith(("D:", "D :")):
-                break                  # a comment line ends the asset block
+                break  # a comment line ends the asset block
             cm = CODE_RE.search(lk)
             tm = TICKER_RE.search(lk)
             if cm:
@@ -459,17 +523,17 @@ def house_trades_from_text(text):
                         ticker = tm.group(1)
                     else:
                         bt = re.search(
-                            r"(?<![A-Za-z0-9.])([A-Za-z][A-Za-z0-9.]{0,4})\s*\[[A-Z0-9]+\]\s*$",
-                            lk)
+                            r"(?<![A-Za-z0-9.])([A-Za-z][A-Za-z0-9.]{0,4})\s*\[[A-Z0-9]+\]\s*$", lk
+                        )
                         if bt and bt.group(1).isupper() and bt.group(1) not in NON_TICKER_WORDS:
                             ticker = bt.group(1)
                 k += 1
-                break                      # a code line ends the asset block
+                break  # a code line ends the asset block
             if tm and ticker is None:
                 ticker = tm.group(1)
                 k += 1
                 continue
-            wrapped.append(lk)              # more wrapped asset text
+            wrapped.append(lk)  # more wrapped asset text
             k += 1
         if wrapped:
             asset_text = " ".join([asset_text] + wrapped)
@@ -480,11 +544,11 @@ def house_trades_from_text(text):
         tm = TICKER_RE.search(asset_text)
         if tm and ticker is None:
             ticker = tm.group(1)
-            asset_text = (asset_text[: tm.start()] + asset_text[tm.end():]).strip()
+            asset_text = (asset_text[: tm.start()] + asset_text[tm.end() :]).strip()
         if ticker is None:
             bt = re.search(
-                r"(?<![A-Za-z0-9.])([A-Za-z][A-Za-z0-9.]{0,4})\s*\[[A-Z0-9]+\]\s*$",
-                asset_text)
+                r"(?<![A-Za-z0-9.])([A-Za-z][A-Za-z0-9.]{0,4})\s*\[[A-Z0-9]+\]\s*$", asset_text
+            )
             if bt and bt.group(1).isupper() and bt.group(1) not in NON_TICKER_WORDS:
                 ticker = bt.group(1)
         asset_name = CODE_RE.sub("", asset_text).strip(" ,-:")
@@ -501,20 +565,26 @@ def house_trades_from_text(text):
                 k += 1
                 while k < n and k <= i + 10:
                     lk = lines[k]
-                    if TXN_RE.search(lk) or BOUNDARY_RE.search(lk) or lk.startswith(
-                            ("* For the complete list", "I CERTIFY", "Digitally Signed")):
+                    if (
+                        TXN_RE.search(lk)
+                        or BOUNDARY_RE.search(lk)
+                        or lk.startswith(
+                            ("* For the complete list", "I CERTIFY", "Digitally Signed")
+                        )
+                    ):
                         break
                     if lk.startswith(("D:", "D :")):
-                        comment = " ".join(
-                            [comment, re.sub(r"^D\s*:", "", lk).strip()]).strip()
+                        comment = " ".join([comment, re.sub(r"^D\s*:", "", lk).strip()]).strip()
                         k += 1
                         continue
                     comment = " ".join([comment, lk.strip()]).strip()
                     k += 1
                 break
-            if TXN_RE.search(lines[k]) or BOUNDARY_RE.search(lines[k]) or \
-                    lines[k].startswith(
-                        ("* For the complete list", "I CERTIFY", "Digitally Signed")):
+            if (
+                TXN_RE.search(lines[k])
+                or BOUNDARY_RE.search(lines[k])
+                or lines[k].startswith(("* For the complete list", "I CERTIFY", "Digitally Signed"))
+            ):
                 break
             k += 1
 
@@ -522,17 +592,19 @@ def house_trades_from_text(text):
         if partial:
             txn_type += " (partial)"
         amount = amt1 + (f" - {amt2}" if amt2 else "")
-        trades.append({
-            "owner": owner,
-            "ticker": ticker,
-            "asset_name": asset_name,
-            "asset_type": asset_code,
-            "type": txn_type,
-            "amount": amount,
-            "txn_date": txn_date,
-            "notif_date": notif_date,
-            "comment": comment,
-        })
+        trades.append(
+            {
+                "owner": owner,
+                "ticker": ticker,
+                "asset_name": asset_name,
+                "asset_type": asset_code,
+                "type": txn_type,
+                "amount": amount,
+                "txn_date": txn_date,
+                "notif_date": notif_date,
+                "comment": comment,
+            }
+        )
         i += 1
 
     if not trades and COL_HEADER_RE.search("\n".join(lines)):
@@ -571,7 +643,8 @@ def house_ptr_trades_columnar(lines):
             i += 1
             continue
         owner = {"SP": "Spouse", "JT": "Joint", "SELF": "Self", "SO": "Spouse"}.get(
-            m.group(1).upper(), m.group(1))
+            m.group(1).upper(), m.group(1)
+        )
         code = m.group("code")
         txn_date, notif_date = m.group("d1"), m.group("d2")
         asset_text = m.group("asset").strip()
@@ -605,12 +678,15 @@ def house_ptr_trades_columnar(lines):
                 k += 1
                 while k < n and k <= i + 4:
                     clk = lines[k]
-                    if COL_ANCHOR_RE.match(clk) or TXN_RE.search(clk) or \
-                            BOUNDARY_RE.search(clk) or clk.startswith(("F S:", "S O:")):
+                    if (
+                        COL_ANCHOR_RE.match(clk)
+                        or TXN_RE.search(clk)
+                        or BOUNDARY_RE.search(clk)
+                        or clk.startswith(("F S:", "S O:"))
+                    ):
                         break
                     if clk.startswith(("D:", "D :")):
-                        comment = " ".join(
-                            [comment, re.sub(r"^D\s*:", "", clk).strip()]).strip()
+                        comment = " ".join([comment, re.sub(r"^D\s*:", "", clk).strip()]).strip()
                         k += 1
                         continue
                     comment = " ".join([comment, clk.strip()]).strip()
@@ -623,17 +699,19 @@ def house_ptr_trades_columnar(lines):
         if tail.startswith("Over"):
             amount = "Over " + amount
 
-        trades.append({
-            "owner": owner,
-            "ticker": None,
-            "asset_name": asset_text,
-            "asset_type": asset_code,
-            "type": txn_type,
-            "amount": amount,
-            "txn_date": txn_date,
-            "notif_date": notif_date,
-            "comment": comment,
-        })
+        trades.append(
+            {
+                "owner": owner,
+                "ticker": None,
+                "asset_name": asset_text,
+                "asset_type": asset_code,
+                "type": txn_type,
+                "amount": amount,
+                "txn_date": txn_date,
+                "notif_date": notif_date,
+                "comment": comment,
+            }
+        )
         i += 1
     return trades
 
@@ -665,7 +743,7 @@ PTR_AMOUNT_RANGES = [
     "$5,000,001 - $25,000,000",
     "$25,000,001 - $50,000,000",
     "Over $50,000,000",
-    "Over $1,000,000",        # wide box: spouse/dependent-child asset
+    "Over $1,000,000",  # wide box: spouse/dependent-child asset
 ]
 
 # Column boundaries as fractions of the form's width. Index i gives the start
@@ -682,8 +760,17 @@ _PTR_COL_FRACS = [
     0.3874,  # 6  type X | txn date     (657/1696)
     0.4729,  # 7  txn | notif date      (802/1696)
     0.5383,  # 8  notif | amount        (913/1696)
-    0.5743, 0.6097, 0.6450, 0.6810, 0.7158, 0.7512,
-    0.7860, 0.8213, 0.8567, 0.8921, 0.9269,  # amount box edges
+    0.5743,
+    0.6097,
+    0.6450,
+    0.6810,
+    0.7158,
+    0.7512,
+    0.7860,
+    0.8213,
+    0.8567,
+    0.8921,
+    0.9269,  # amount box edges
     1.0000,  # 20 right edge
 ]
 # Expected number of vertical gridlines on the form (incl. left/right edges).
@@ -693,8 +780,13 @@ _PTR_EXPECTED_GRIDLINES = len(_PTR_COL_FRACS)
 # OCR of a real row; any asset cell containing one of these phrases is a
 # form header/footer, not a trade.
 _PTR_OCR_GARBAGE = (
-    "ASSET NAME", "PROVIDE FULL", "ANSWERED", "THE ATTACHED",
-    "TICKER SYMBE", "FULL NAME", "YOU ANSWERED",
+    "ASSET NAME",
+    "PROVIDE FULL",
+    "ANSWERED",
+    "THE ATTACHED",
+    "TICKER SYMBE",
+    "FULL NAME",
+    "YOU ANSWERED",
 )
 # Data-row band starts as fractions of the form's height (native 2200px).
 _PTR_ROW_FRACS = [0.6305, 0.6568, 0.6827, 0.7082, 0.7341]
@@ -708,7 +800,6 @@ def _tess_available():
 def _render_ptr_pages(raw, scale=2):
     """Render a PTR PDF's pages to PIL grayscale images via pypdfium2."""
     import pypdfium2 as pdfium
-    from PIL import Image
 
     pages = []
     with pdfium.PdfDocument(raw) as doc:
@@ -725,12 +816,13 @@ def _render_ptr_pages_hires(raw):
     materializing the whole document. Only date-cell OCR uses these renders.
     """
     import pypdfium2 as pdfium
-    from PIL import Image
 
     with pdfium.PdfDocument(raw) as doc:
         for page in doc:
-            yield (page.render(scale=6).to_pil().convert("L"),
-                   page.render(scale=12).to_pil().convert("L"))
+            yield (
+                page.render(scale=6).to_pil().convert("L"),
+                page.render(scale=12).to_pil().convert("L"),
+            )
 
 
 def _detect_gridlines(img, vertical=True, min_frac=0.55):
@@ -743,7 +835,7 @@ def _detect_gridlines(img, vertical=True, min_frac=0.55):
     w, h = img.size
     px = img.load()
     if vertical:
-        lo, hi = int(h * 0.55), int(h * 0.80)     # data-row band
+        lo, hi = int(h * 0.55), int(h * 0.80)  # data-row band
         scores = []
         for x in range(w):
             dark = sum(1 for y in range(lo, hi) if px[x, y] < 128)
@@ -805,12 +897,14 @@ def _ptr_layout(img):
     row_bands = []
     if len(rows) >= 2:
         # Adjacent rules delimit a band; take the tight pairs as data rows.
-        for a, b in zip(rows, rows[1:]):
+        for a, b in zip(rows, rows[1:], strict=False):
             row_bands.append((int(a), int(b)))
     else:
         # Fall back to the standard row pitch.
-        row_bands = [(int(_PTR_ROW_FRACS[i] * h), int(_PTR_ROW_FRACS[i + 1] * h))
-                     for i in range(len(_PTR_ROW_FRACS) - 1)]
+        row_bands = [
+            (int(_PTR_ROW_FRACS[i] * h), int(_PTR_ROW_FRACS[i + 1] * h))
+            for i in range(len(_PTR_ROW_FRACS) - 1)
+        ]
         structural_ok = False
     return cols, row_bands, structural_ok
 
@@ -821,8 +915,9 @@ def _ocr_cell(img, box, psm=7, scale=2.0):
     Cleans gridline bleed: scanned forms often include the cell's rule line
     at the crop edge, which tesseract reads as a stray '|' or run of dashes.
     """
-    from PIL import Image
     import subprocess
+
+    from PIL import Image
 
     x0, y0, x1, y1 = box
     crop = img.crop((x0, y0, x1, y1))
@@ -834,7 +929,10 @@ def _ocr_cell(img, box, psm=7, scale=2.0):
     crop.save(buf, format="PNG")
     proc = subprocess.run(
         ["tesseract", "stdin", "stdout", "--psm", str(psm)],
-        input=buf.getvalue(), capture_output=True, timeout=20)
+        input=buf.getvalue(),
+        capture_output=True,
+        timeout=20,
+    )
     text = proc.stdout.decode("utf-8", "replace").strip()
     text = re.sub(r"\s+", " ", text)
     # strip rule-line bleed: leading/trailing pipes, dashes, colons, bars
@@ -855,22 +953,32 @@ def _ocr_date_cell(img6, img12, box, y0, y1):
     a plausible date, otherwise the SC6 recipe (which handles clean pages) is
     used. Returns the raw OCR string (year may be truncated; caller pads it).
     """
-    from PIL import Image
     import subprocess
+
+    from PIL import Image
 
     bx0, bx1 = box
     y0_6, y1_6 = y0 * 3, y1 * 3
     bx0_6, bx1_6 = bx0 * 3, bx1 * 3
 
     def _tess(crop, scale=3):
-        gg = crop.resize((crop.size[0] * scale, crop.size[1] * scale),
-                         Image.Resampling.NEAREST)
+        gg = crop.resize((crop.size[0] * scale, crop.size[1] * scale), Image.Resampling.NEAREST)
         buf = io.BytesIO()
         gg.save(buf, format="PNG")
         proc = subprocess.run(
-            ["tesseract", "stdin", "stdout", "--psm", "7",
-             "-c", "tessedit_char_whitelist=0123456789/"],
-            input=buf.getvalue(), capture_output=True, timeout=20)
+            [
+                "tesseract",
+                "stdin",
+                "stdout",
+                "--psm",
+                "7",
+                "-c",
+                "tessedit_char_whitelist=0123456789/",
+            ],
+            input=buf.getvalue(),
+            capture_output=True,
+            timeout=20,
+        )
         return proc.stdout.decode("utf-8", "replace").strip()
 
     # SC12 pass: bottom half of the band, tight text bounds, binarize, 3x.
@@ -882,8 +990,7 @@ def _ocr_date_cell(img6, img12, box, y0, y1):
     # Clamp to image bounds: Pillow pads out-of-bounds crop regions with
     # black, which would fabricate phantom dark pixels and send a blank cell
     # to tesseract (crashes on hosts without tesseract, e.g. CI).
-    sub = img12.crop((max(0, cx0), max(0, cy0),
-                      min(img12.width, cx1), min(img12.height, cy1)))
+    sub = img12.crop((max(0, cx0), max(0, cy0), min(img12.width, cx1), min(img12.height, cy1)))
     pxs = sub.load()
     ys = [y for y in range(sub.height) for x in range(sub.width) if pxs[x, y] < 128]
     if ys:
@@ -899,13 +1006,11 @@ def _ocr_date_cell(img6, img12, box, y0, y1):
 
     # SC6 fallback: text bounds inside the band, binarize, 6x.
     px = img6.load()
-    ys = [y for y in range(y0_6 + 5, y1_6 - 5)
-          for x in range(bx0_6 + 8, bx1_6) if px[x, y] < 128]
+    ys = [y for y in range(y0_6 + 5, y1_6 - 5) for x in range(bx0_6 + 8, bx1_6) if px[x, y] < 128]
     if not ys:
         return ""
     t0, t1 = min(ys) - 4, max(ys) + 4
-    xs = [x for y in range(t0, t1)
-          for x in range(bx0_6 + 8, bx1_6) if px[x, y] < 128]
+    xs = [x for y in range(t0, t1) for x in range(bx0_6 + 8, bx1_6) if px[x, y] < 128]
     if not xs:
         return ""
     x0, x1 = min(xs) - 4, max(xs) + 6
@@ -937,9 +1042,7 @@ def _normalize_ocr_date(s, filing_year=2025):
             y = str(filing_year)
         else:
             return None
-    elif len(y) == 2:
-        y = "20" + y
-    elif len(y) == 3:
+    elif len(y) == 2 or len(y) == 3:
         y = "20" + y
     return f"{mo:02d}/{d:02d}/{y}"
 
@@ -1020,12 +1123,12 @@ def house_ptr_trades_ocr(raw, pdf_url):
     for page_idx, img in enumerate(pages):
         img6, img12 = next(hires)
         cols, row_bands, structural_ok = _ptr_layout(img)
-        type_boxes = [cols[3], cols[4], cols[5]]          # P, S, X
-        amount_boxes = cols[8:]                            # 11 narrow + wide
+        type_boxes = [cols[3], cols[4], cols[5]]  # P, S, X
+        amount_boxes = cols[8:]  # 11 narrow + wide
         if len(amount_boxes) != 12 or len(type_boxes) != 3:
             structural_ok = False
 
-        for (y0, y1) in row_bands:
+        for y0, y1 in row_bands:
             asset = _ocr_cell(img, (cols[2][0], y0, cols[2][1], y1)).strip(" ,-:")
             if any(g in asset.upper() for g in _PTR_OCR_GARBAGE):
                 continue  # form header/footer instruction row, not a trade
@@ -1052,14 +1155,20 @@ def house_ptr_trades_ocr(raw, pdf_url):
                 ticker = None
 
             confidence = "high"
-            if (not structural_ok or not asset or not txn_date or not notif_date
-                    or not type_ok or not amt_ok):
+            if (
+                not structural_ok
+                or not asset
+                or not txn_date
+                or not notif_date
+                or not type_ok
+                or not amt_ok
+            ):
                 confidence = "low"
             elif ticker is None or owner == "Self" and not owner_text.strip():
                 confidence = "medium"
 
             if code is None:
-                continue   # unreadable type code: skip, log below
+                continue  # unreadable type code: skip, log below
 
             amt_label = PTR_AMOUNT_RANGES[amt_idx] if amt_idx is not None else None
             if amt_label is None:
@@ -1069,9 +1178,11 @@ def house_ptr_trades_ocr(raw, pdf_url):
             # TXN_RE needs a plain numeric anchor, so "Over"/spouse-DC boxes
             # are patched in afterwards.
             anchor_amt = re.sub(r"^Over\s+", "", amt_label)
-            line = (f"{asset} {code} {txn_date} {notif_date} {anchor_amt}"
-                    if ticker is None else
-                    f"{asset} ({ticker}) {code} {txn_date} {notif_date} {anchor_amt}")
+            line = (
+                f"{asset} {code} {txn_date} {notif_date} {anchor_amt}"
+                if ticker is None
+                else f"{asset} ({ticker}) {code} {txn_date} {notif_date} {anchor_amt}"
+            )
             parsed = house_trades_from_text(line)
             if not parsed:
                 confidence = "low"
@@ -1084,8 +1195,7 @@ def house_ptr_trades_ocr(raw, pdf_url):
             t["pdf_page"] = page_idx
             trades.append(t)
             if confidence == "low":
-                print(f"house: LOW-CONFIDENCE OCR row {pdf_url} p{page_idx}: "
-                      f"{t!r}", flush=True)
+                print(f"house: LOW-CONFIDENCE OCR row {pdf_url} p{page_idx}: {t!r}", flush=True)
     return trades
 
 
@@ -1117,13 +1227,16 @@ def run_house(conn, years=None, refresh=False):
                 """SELECT f.id FROM filings f
                     WHERE EXISTS (SELECT 1 FROM trades t WHERE t.filing_id = f.id)
                        OR f.parse_attempts >= %s""",
-                (PTR_MAX_ATTEMPTS,))
+                (PTR_MAX_ATTEMPTS,),
+            )
             done = {r[0] for r in cur.fetchall()}
     else:
         done = set()
         with conn.cursor() as cur:
-            cur.execute("UPDATE filings SET parse_attempts = 0, "
-                        "parse_attempted_at = NULL WHERE parse_attempts > 0")
+            cur.execute(
+                "UPDATE filings SET parse_attempts = 0, "
+                "parse_attempted_at = NULL WHERE parse_attempts > 0"
+            )
     new_filings = 0
     new_trades = 0
     for year in sorted(years):
@@ -1140,19 +1253,22 @@ def run_house(conn, years=None, refresh=False):
             if trades:
                 # OCR rows never silently ingested: low-confidence ones are
                 # logged for review and skipped.
-                low = [t for t in trades
-                       if t.get("source") == "ocr" and t.get("confidence") == "low"]
+                low = [
+                    t for t in trades if t.get("source") == "ocr" and t.get("confidence") == "low"
+                ]
                 ingest = [t for t in trades if t not in low]
                 for t in low:
-                    print(f"house: SKIP low-confidence OCR {filing['id']}: "
-                          f"{t.get('asset_name')!r} {t.get('type')} "
-                          f"{t.get('txn_date')} {t.get('amount')}", flush=True)
+                    print(
+                        f"house: SKIP low-confidence OCR {filing['id']}: "
+                        f"{t.get('asset_name')!r} {t.get('type')} "
+                        f"{t.get('txn_date')} {t.get('amount')}",
+                        flush=True,
+                    )
                 trades = ingest
             if trades:
                 with conn.cursor() as cur:
                     if refresh:
-                        cur.execute("DELETE FROM trades WHERE filing_id = %s",
-                                    (filing["id"],))
+                        cur.execute("DELETE FROM trades WHERE filing_id = %s", (filing["id"],))
                     insert_trades(cur, filing["id"], trades)
                 new_trades += len(trades)
                 conn.commit()
@@ -1166,13 +1282,16 @@ def run_house(conn, years=None, refresh=False):
                                   parse_attempted_at = now()
                             WHERE id = %s
                         RETURNING parse_attempts""",
-                        (filing["id"],))
+                        (filing["id"],),
+                    )
                     row = cur.fetchone()
                 conn.commit()
                 if row and row[0] == PTR_MAX_ATTEMPTS:
-                    print(f"house: giving up on {filing['id']} after "
-                          f"{row[0]} attempts, no trades extractable",
-                          flush=True)
+                    print(
+                        f"house: giving up on {filing['id']} after "
+                        f"{row[0]} attempts, no trades extractable",
+                        flush=True,
+                    )
             time.sleep(0.2)  # be polite to the PDF server
     conn.commit()
     return new_filings, new_trades
@@ -1180,11 +1299,13 @@ def run_house(conn, years=None, refresh=False):
 
 # ---------------------------------------------------------------- db
 
+
 def db_conn():
     with open(PG_PASS_FILE) as fh:
         pw = fh.read().strip()
-    return psycopg.connect(host=PG_HOST, port=PG_PORT, dbname=PG_DB,
-                           user=PG_USER, password=pw, connect_timeout=10)
+    return psycopg.connect(
+        host=PG_HOST, port=PG_PORT, dbname=PG_DB, user=PG_USER, password=pw, connect_timeout=10
+    )
 
 
 def run_migrations(conn):
@@ -1237,11 +1358,11 @@ def stale_sources(conn, max_age_days=None):
                           WHERE EXISTS (SELECT 1 FROM trades t
                                         WHERE t.filing_id = f.id)) AS newest_parsed
                  FROM filings f
-                GROUP BY f.source""")
+                GROUP BY f.source"""
+        )
         rows = {src: newest for src, newest in cur.fetchall()}
     cutoff = date.today() - timedelta(days=max_age_days)
-    return [(src, rows.get(src)) for src in SOURCES
-            if rows.get(src) is None or rows[src] < cutoff]
+    return [(src, rows.get(src)) for src in SOURCES if rows.get(src) is None or rows[src] < cutoff]
 
 
 def upsert_filing(cur, filing):
@@ -1251,8 +1372,14 @@ def upsert_filing(cur, filing):
            ON CONFLICT (id) DO UPDATE
              SET filed_at = COALESCE(filings.filed_at, EXCLUDED.filed_at)
            RETURNING (xmax = 0) AS inserted""",
-        (filing["id"], filing["source"], filing["filer"], filing.get("report_type"),
-         filing.get("filed_at"), filing.get("raw_url")),
+        (
+            filing["id"],
+            filing["source"],
+            filing["filer"],
+            filing.get("report_type"),
+            filing.get("filed_at"),
+            filing.get("raw_url"),
+        ),
     )
     return cur.fetchone()[0]  # True if newly inserted, False if already known
 
@@ -1265,20 +1392,27 @@ def insert_trades(cur, filing_id, trades):
         # A txn dated after its notification is impossible; flag it for review
         # (source PDFs occasionally contain such typos) but store as-is.
         if txn and notif and txn > notif:
-            print(f"WARN {filing_id}: txn {txn} after notif {notif} (check source)",
-                  flush=True)
+            print(f"WARN {filing_id}: txn {txn} after notif {notif} (check source)", flush=True)
         cur.execute(
             """INSERT INTO trades (filing_id, ticker, owner, transaction_type,
                                    amount_range, transaction_date, notification_date, raw)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                ON CONFLICT DO NOTHING""",
-            (filing_id, t.get("ticker"), t.get("owner"), t.get("type"),
-             t.get("amount"), txn, notif,
-             json.dumps(t)),
+            (
+                filing_id,
+                t.get("ticker"),
+                t.get("owner"),
+                t.get("type"),
+                t.get("amount"),
+                txn,
+                notif,
+                json.dumps(t),
+            ),
         )
 
 
 # ---------------------------------------------------------------- main
+
 
 def run_senate(conn, start=None, end=None):
     s = senate_session()
@@ -1288,7 +1422,6 @@ def run_senate(conn, start=None, end=None):
     # Site expects "MM/DD/YYYY HH:MM:SS"; empty end_date = no upper bound (verified
     # that's what the site's own search page sends).
     start_str = f"{start:%m/%d/%Y} 00:00:00"
-    end_str = "" if end >= date.today() else f"{end:%m/%d/%Y} 23:59:59"
     new_filings = 0
     new_trades = 0
     offset = 0
@@ -1324,16 +1457,18 @@ def run_senate(conn, start=None, end=None):
                     # [0]=#, [1]=txn date, [2]=owner, [3]=ticker, [4]=asset name,
                     # [5]=asset type, [6]=type, [7]=amount, [8]=comment
                     ticker = cells[3] if cells[3] not in ("", "--") else None
-                    trades.append({
-                        "owner": cells[2],
-                        "ticker": ticker,
-                        "asset_name": cells[4],
-                        "asset_type": cells[5],
-                        "type": cells[6],
-                        "amount": cells[7],
-                        "txn_date": cells[1],
-                        "comment": cells[8],
-                    })
+                    trades.append(
+                        {
+                            "owner": cells[2],
+                            "ticker": ticker,
+                            "asset_name": cells[4],
+                            "asset_type": cells[5],
+                            "type": cells[6],
+                            "amount": cells[7],
+                            "txn_date": cells[1],
+                            "comment": cells[8],
+                        }
+                    )
                 insert_trades(cur, filing["id"], trades)
                 new_trades += len(trades)
             new_filings += 1
@@ -1346,7 +1481,9 @@ def run_senate(conn, start=None, end=None):
 
 
 def main():
-    log = lambda msg: print(f"{datetime.now().isoformat()} {msg}", flush=True)
+    def log(msg):
+        print(f"{datetime.now().isoformat()} {msg}", flush=True)
+
     start = end = None
     days_back = os.environ.get("DAYS_BACK", "30")
     if os.environ.get("START_DATE"):
@@ -1378,8 +1515,7 @@ def main():
                 log(f"ERROR house: {e!r}")
                 failed.append("house")
             for src, latest in stale_sources(conn):
-                log(f"ERROR stale: {src} newest filing is {latest} "
-                    f"(older than {STALE_DAYS}d)")
+                log(f"ERROR stale: {src} newest filing is {latest} (older than {STALE_DAYS}d)")
                 failed.append(f"{src} (stale)")
     except Exception as e:
         log(f"ERROR: {e!r}")

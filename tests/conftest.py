@@ -14,8 +14,6 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import pull_congress as pc
-
 
 class FakeCursor:
     """Records execute() calls; fetchone/fetchall return canned values.
@@ -25,7 +23,7 @@ class FakeCursor:
     """
 
     def __init__(self, fetchone_result=(True,), fetchall_result=None):
-        self.calls = []          # [(sql, params), ...]
+        self.calls = []  # [(sql, params), ...]
         self.rowcount = None
         self._fetchone = fetchone_result
         self._fetchall = fetchall_result if fetchall_result is not None else []
@@ -130,7 +128,7 @@ class FakeSession:
         self.text_by_url = text_by_url or {}
         self.bytes_by_url = bytes_by_url or {}
         self.bytes_errors = bytes_errors or {}
-        self.cookies = {}   # like pc.Session, a plain dict of cookie names
+        self.cookies = {}  # like pc.Session, a plain dict of cookie names
         self.request_calls = []
         self.request_bytes_calls = []
 

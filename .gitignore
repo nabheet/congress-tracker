@@ -5,3 +5,4 @@ __pycache__/
 # local artifacts
 .coverage
 htmlcov/
+.ruff_cache/
