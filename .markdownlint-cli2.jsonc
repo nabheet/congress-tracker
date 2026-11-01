@@ -1,0 +1,15 @@
+{
+  // markdownlint-cli2 config — full enforcement, no rule exclusions.
+  // Full rule list: https://github.com/DavidAnson/markdownlint/blob/main/doc/Rules.md
+  "config": {
+    "default": true,
+    // MD013: line length — ENFORCED at 100 everywhere (matches biome lineWidth)
+    "MD013": { "line_length": 100 }
+    // MD024: duplicate headings — ENFORCED (changelogs/reference docs must vary)
+    // MD041: first line must be a top-level heading — ENFORCED
+    // MD060: table column style — ENFORCED
+  },
+  // `!.venv/**` is Python-specific: without it the config lints every
+  // `LICENSE.md` and `README.md` inside site-packages.
+  "globs": ["**/*.md", "!node_modules/**", "!dist/**", "!.venv/**", "!.git/**"]
+}

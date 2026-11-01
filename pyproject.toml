@@ -22,7 +22,19 @@ dev = [
     "pyright==1.1.411",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
+    "ruff>=0.14",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+# Script repo: pull_congress.py is imported directly by the tests.
+known-first-party = ["pull_congress"]
 
 [tool.uv]
 # Script repo — pull_congress.py is not an importable package.
