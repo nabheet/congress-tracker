@@ -27,7 +27,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v6
         with:
-          version: "0.12.10"
+          version: "0.13.6"
 
       - name: Sync deps (frozen)
         run: uv sync --frozen --no-dev
@@ -56,7 +56,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v6
         with:
-          version: "0.12.10"
+          version: "0.13.6"
 
       - name: Sync deps (frozen, dev group)
         run: uv sync --frozen
